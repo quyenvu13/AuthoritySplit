@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="t d">
+<title id="t">AuthoritySplit</title>
+<desc id="d">Two separated authority brackets around a neutral decision point.</desc>
+<rect width="512" height="512" rx="112" fill="#15171c"/>
+<path d="M232 116H174c-45 0-82 37-82 82v116c0 45 37 82 82 82h58"
+      fill="none" stroke="#f6f2e8" stroke-width="34" stroke-linecap="round"/>
+<path d="M280 116h58c45 0 82 37 82 82v116c0 45-37 82-82 82h-58"
+      fill="none" stroke="#f6f2e8" stroke-width="34" stroke-linecap="round"/>
+<path d="M256 100v312" stroke="#7894ff" stroke-width="18" stroke-linecap="round"/>
+<circle cx="256" cy="256" r="34" fill="#e96359"/>
+<path d="M180 256h42M290 256h42" stroke="#f6f2e8" stroke-width="16" stroke-linecap="round"/>
+</svg>
