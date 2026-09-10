@@ -98,7 +98,8 @@ A clause giving the vendor sole discretion was classified `SELF_JUDGING_AUTHORIT
 and froze the escrow; a clause naming a jointly-selected third party was classified
 `INDEPENDENT_DETERMINATION` and, once countersigned, released it. Thirteen
 transactions across two money paths and three wallets — including every refusal —
-are listed with their hashes in `TESTING.md` §D.
+are listed with their hashes in `TESTING.md` §D, and screenshotted in
+`docs/evidence/`.
 
 ## Verification
 
@@ -183,6 +184,7 @@ src/genlayer.ts                  StudioNet reads/writes and execution decoding
 src/config.ts                    deployed address and pinned source hash
 LOCKED_SPEC.md                   the frozen behavioural specification
 TESTING.md                       what each check proves, and how to re-run it
+docs/evidence/                   screenshots of the live run, indexed to tx hashes
 FINAL_CHECKSUMS.txt              SHA-256 of every tracked file
 ```
 

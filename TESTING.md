@@ -222,6 +222,12 @@ Agreement #1 reached one `SELF_JUDGING_AUTHORITY` verdict and never obtained an
 independent determination, which is exactly the state in which the refund path is
 open and the release path is closed.
 
+### Screenshots
+
+`docs/evidence/` holds sixteen screenshots of the run above, numbered in order,
+with an index that maps each one to its transaction. They are a convenience for
+reading the run; the hashes are the evidence.
+
 ### Rows deliberately left out
 
 `create_agreement` and `accept_duty` for Agreement #1, and its self-judging
