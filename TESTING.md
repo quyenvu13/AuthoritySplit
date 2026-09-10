@@ -9,8 +9,8 @@ npm install
 
 npm run verify          # integrity: hash parity, no build artifacts, full manifest
 npm run lint:genvm      # GenVM linter (AST only, offline)
-npm run test:direct     # 28 checks on a pinned GenVM build
-npm run test:mutations  # 20 mutants; the suite must catch every one
+npm run test:direct     # 34 checks on a pinned GenVM build
+npm run test:mutations  # 21 mutants; the suite must catch every one
 npm run build           # TypeScript + Vite
 
 npm run check           # all of the above, in order
@@ -52,18 +52,20 @@ does not describe the repository, fails the gate rather than passing silently.
 
 Regenerate the manifest after any change: `npm run checksums`.
 
-## B. Direct Mode — 28 checks on real GenVM
+## B. Direct Mode — 34 checks on real GenVM
 
 `tests/direct/conftest.py` pins `GENVM_VERSION = "v0.2.12"` and passes it to every
 `direct_deploy`, so a clean machine executes the same runtime the contract was
 verified against instead of resolving "latest".
 
-### `test_escrow_consequence.py` — 15 checks
+### `test_escrow_consequence.py` — 21 checks
 
 | Test | What it proves |
 |---|---|
 | `test_the_two_parties_must_be_distinct_addresses` | One wallet cannot hold both roles. |
 | `test_escrow_is_required_at_creation` | An agreement with nothing at stake cannot exist. |
+| `test_the_refund_window_must_sit_inside_its_bound` (×4) | 899 s, 0, a negative window and one second over a year are each refused, and no agreement is created. |
+| `test_both_ends_of_the_refund_window_bound_are_accepted` (×2) | The bound is inclusive: 15 minutes and one year both work. |
 | `test_nothing_can_be_proposed_before_the_duty_is_accepted` | The semantic layer is unreachable until both parties have signed. |
 | `test_only_the_named_responsible_party_may_accept` | Acceptance is the second signature, not a public button. |
 | `test_an_independent_verdict_only_reaches_pending` | Consensus queues a clause; it does not activate one. |
@@ -115,7 +117,7 @@ suite catches it.
 ## C. Mutation matrix — `npm run test:mutations`
 
 A green suite proves nothing until it is shown to fail when the contract is wrong.
-`scripts/mutation_matrix.py` writes twenty broken copies of the contract to a
+`scripts/mutation_matrix.py` writes twenty-one broken copies of the contract to a
 temporary directory — the real source is never modified — and runs the whole suite
 against each one through `AUTHORITYSPLIT_CONTRACT`.
 
@@ -141,8 +143,9 @@ M17  killed    a released agreement can be released again
 M18  killed    a settled agreement can still be refunded
 M19  killed    an identical clause may replace the one in force
 M20  killed    the prompt fence stops neutralising angle brackets
+M21  killed    the refund window may sit outside its bound
 
-20/20 killed, 0 survived, 0 invalid
+21/21 killed, 0 survived, 0 invalid
 ```
 
 Every mutant maps to a numbered clause in `LOCKED_SPEC.md`. The script exits

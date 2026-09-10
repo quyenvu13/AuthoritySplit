@@ -51,6 +51,44 @@ def test_the_two_parties_must_be_distinct_addresses(
         direct_vm.value = 0
 
 
+@pytest.mark.parametrize("seconds,label", [
+    (899, "one second under the floor"),
+    (0, "zero"),
+    (-900, "negative"),
+    (31536001, "one second over the ceiling"),
+])
+def test_the_refund_window_must_sit_inside_its_bound(
+    direct_vm, direct_deploy, direct_alice, direct_bob, chain_warp, seconds, label
+):
+    contract = direct_deploy(CONTRACT, sdk_version=GENVM_VERSION)
+    direct_vm.sender = direct_alice
+    direct_vm.value = ESCROW
+    try:
+        with pytest.raises(Exception, match="Refund window out of range"):
+            contract.create_agreement(hex_of(direct_bob), DUTY, seconds)
+        assert json.loads(contract.get_config())["agreement_count"] == 0, label
+    finally:
+        direct_vm.value = 0
+
+
+@pytest.mark.parametrize("seconds", [900, 31536000])
+def test_both_ends_of_the_refund_window_bound_are_accepted(
+    direct_vm, direct_deploy, direct_alice, direct_bob, chain_warp, seconds
+):
+    """The bound is inclusive at both ends, so 15 minutes and one year both work."""
+    contract = direct_deploy(CONTRACT, sdk_version=GENVM_VERSION)
+    direct_vm.sender = direct_alice
+    direct_vm.value = ESCROW
+    try:
+        contract.create_agreement(hex_of(direct_bob), DUTY, seconds)
+    finally:
+        direct_vm.value = 0
+
+    state = ag(contract)
+    assert state["status"] == "AWAITING_ACCEPTANCE"
+    assert state["refund_deadline_unix"] > 0
+
+
 def test_escrow_is_required_at_creation(
     direct_vm, direct_deploy, direct_alice, direct_bob, chain_warp
 ):

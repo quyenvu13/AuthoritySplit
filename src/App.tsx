@@ -47,6 +47,8 @@ const PAGES: Array<{ id: Page; label: string; kicker: string }> = [
 ];
 
 const WINDOW_CHOICES: Array<{ label: string; seconds: number }> = [
+  { label: '15 minutes', seconds: 900 },
+  { label: '30 minutes', seconds: 1800 },
   { label: '1 hour', seconds: 3600 },
   { label: '1 day', seconds: 86400 },
   { label: '7 days', seconds: 604800 },
@@ -182,7 +184,7 @@ export default function App() {
   const [partyInput, setPartyInput] = useState('');
   const [dutyInput, setDutyInput] = useState('');
   const [escrowInput, setEscrowInput] = useState('');
-  const [windowInput, setWindowInput] = useState(String(WINDOW_CHOICES[1].seconds));
+  const [windowInput, setWindowInput] = useState(String(WINDOW_CHOICES[3].seconds));
   const [candidateInput, setCandidateInput] = useState('');
 
   const [busy, setBusy] = useState(false);
@@ -1204,7 +1206,7 @@ export default function App() {
               <section className="guard-note">
                 <span>HOW TO RE-RUN</span>
                 <p>
-                  <code>pytest tests/direct</code> executes 28 checks on a pinned GenVM build.
+                  <code>pytest tests/direct</code> executes 34 checks on a pinned GenVM build.
                   <code>python3 scripts/mutation_matrix.py</code> breaks the contract twenty ways and
                   requires the suite to fail on every one. See TESTING.md.
                 </p>

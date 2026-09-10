@@ -76,10 +76,10 @@ resistance; validator reruns provide the convergence discipline.
 | | |
 |---|---|
 | Contract | `contracts/AuthoritySplit.py` |
-| Source SHA-256 | `b13978e8fd162ac7fb88764aeff40eae8d84eb790865c05ab73bc94c2660d2d1` |
+| Source SHA-256 | `d1ff73c8a650f8932a50046fb03c17aa0acedf9d40890091002d47bea4a860f6` |
 | Contract version | `2.0` (`get_config().version`) |
 | Network | GenLayer StudioNet (chain `61999`) |
-| Address | [`0x6c743D9b9c4fdE8e8083125c908E14e7234Ce2be`](https://explorer-studio.genlayer.com/address/0x6c743D9b9c4fdE8e8083125c908E14e7234Ce2be) |
+| Address | set in `src/config.ts` after deployment |
 
 `npm run verify` recomputes the contract hash and fails if `src/config.ts`, the
 contract version, the semantic budget, or `FINAL_CHECKSUMS.txt` disagree with it.
@@ -90,8 +90,8 @@ contract version, the semantic budget, or `FINAL_CHECKSUMS.txt` disagree with it
 npm install
 npm run verify          # hash parity, no build artifacts, full checksum manifest
 npm run lint:genvm      # GenVM linter, AST-only, offline
-npm run test:direct     # 28 checks on a pinned GenVM build
-npm run test:mutations  # 20 mutants, all must be caught
+npm run test:direct     # 34 checks on a pinned GenVM build
+npm run test:mutations  # 21 mutants, all must be caught
 npm run build
 ```
 
@@ -158,7 +158,7 @@ contracts/AuthoritySplit.py    the Intelligent Contract
 tests/direct/conftest.py         pinned GenVM version and shared fixtures
 tests/direct/test_escrow_consequence.py   the money path and the party gates
 tests/direct/test_semantic_guards.py      the semantic layer and its bounds
-scripts/mutation_matrix.py       20 mutants; the suite must catch every one
+scripts/mutation_matrix.py       21 mutants; the suite must catch every one
 scripts/verify.mjs               hash parity, artifact and manifest gate
 scripts/checksums.mjs            regenerates FINAL_CHECKSUMS.txt
 scripts/py.mjs                   cross-platform Python 3.12+ launcher

@@ -3,7 +3,7 @@
 Frozen behavioural specification for `contracts/AuthoritySplit.py`.
 
 ```
-SHA-256  b13978e8fd162ac7fb88764aeff40eae8d84eb790865c05ab73bc94c2660d2d1
+SHA-256  d1ff73c8a650f8932a50046fb03c17aa0acedf9d40890091002d47bea4a860f6
 version  2.0            (get_config().version)
 lines    1006
 ```
@@ -159,8 +159,9 @@ clause freezes the escrow.**
   a Unix timestamp by pure integer arithmetic. No host clock, no calendar library,
   no `time.time()`.
 - A malformed datetime raises rather than defaulting.
-- `refund_window_seconds` must be an integer in `[3600, 31536000]`. Booleans are
-  rejected explicitly, since `bool` is a subclass of `int` in Python.
+- `refund_window_seconds` must be an integer in `[900, 31536000]` — fifteen
+  minutes to one year, inclusive at both ends. *(M21)* Booleans are rejected
+  explicitly, since `bool` is a subclass of `int` in Python.
 
 ## 11. Known limits, stated deliberately
 

@@ -89,6 +89,10 @@ MUTANTS = [
     ("M20", "the prompt fence stops neutralising angle brackets",
      '        cleaned = text.replace("<", " ").replace(">", " ")',
      "        cleaned = text"),
+    ("M21", "the refund window may sit outside its bound",
+     "        if (\n            refund_window_seconds < self.MIN_REFUND_WINDOW\n"
+     "            or refund_window_seconds > self.MAX_REFUND_WINDOW\n        ):",
+     "        if False:"),
 ]
 
 
