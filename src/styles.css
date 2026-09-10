@@ -253,3 +253,6 @@ footer > div { display: flex; align-items: center; gap: 9px; color: var(--ink); 
   .action-row { grid-template-columns: 1fr; align-items: start; }
   .action-row button { width: 100%; }
 }
+
+.will-refuse { margin: 8px 0 0; color: #b94135; font-size: 10.5px; line-height: 1.6; border-left: 2px solid var(--red); padding-left: 9px; max-width: 62ch; }
+.form-panel .will-refuse { margin: 0; }

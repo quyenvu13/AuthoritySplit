@@ -9,10 +9,11 @@
     "preview": "vite preview",
     "verify": "node scripts/verify.mjs",
     "checksums": "node scripts/checksums.mjs",
-    "lint:genvm": "python3 -m genvm_linter.cli lint contracts/AuthoritySplit.py",
-    "test:direct": "python3 -m pytest tests/direct -q",
-    "test:mutations": "python3 scripts/mutation_matrix.py",
-    "check": "npm run verify && npm run lint:genvm && npm run test:direct && npm run test:mutations && npm run build"
+    "lint:genvm": "node scripts/py.mjs -m genvm_linter.cli lint contracts/AuthoritySplit.py",
+    "test:direct": "node scripts/py.mjs -m pytest tests/direct -q",
+    "test:mutations": "node scripts/py.mjs scripts/mutation_matrix.py",
+    "check": "npm run verify && npm run lint:genvm && npm run test:direct && npm run test:mutations && npm run build",
+    "check:js": "npm run verify && npm run build"
   },
   "dependencies": {
     "genlayer-js": "^1.1.8",

@@ -73,7 +73,6 @@ export type TxView = {
   label: string;
   hash?: `0x${string}`;
   message?: string;
-  execution?: string;
 };
 
 declare global {

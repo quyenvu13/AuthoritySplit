@@ -136,81 +136,84 @@ export const refundEscrowTx = (account: Address, agreementId: number) =>
 /* --------------------------------------------------- execution inspection */
 
 /**
- * StudioNet caveat, verified against genlayer-js 1.1.8:
- * `waitForTransactionReceipt` routes a chain with `isStudio` through
- * `decodeLocalnetTransaction`, which never sets `txExecutionResultName`.
- * Only `decodeTransaction` (used by `getTransaction`) sets it. So the receipt
- * alone can look identical for a successful and a reverted write, and this
- * module reads the leader receipt directly rather than trusting that field.
- */
-function leaderReceipts(receipt: any): any[] {
-  const sources = [receipt, receipt?._transaction, receipt?.transaction];
-  for (const source of sources) {
-    const list = source?.consensus_data?.leader_receipt;
-    if (Array.isArray(list) && list.length) return list;
-    if (list) return [list];
-  }
-  return [];
-}
-
-function executionName(value: any) {
-  return String(
-    value?.txExecutionResultName ||
-      value?.executionResultName ||
-      value?.transaction?.txExecutionResultName ||
-      value?.transaction?.executionResultName ||
-      '',
-  ).toUpperCase();
-}
-
-export function executionOutcome(receipt: any) {
-  const leaders = leaderReceipts(receipt);
-  if (leaders.length) {
-    const failed = leaders.some(
-      (entry) => String(entry?.execution_result || '').toUpperCase() === 'ERROR',
-    );
-    if (failed) return { ok: false as const, name: 'FINISHED_WITH_ERROR' };
-    const succeeded = leaders.some(
-      (entry) => String(entry?.execution_result || '').toUpperCase() === 'SUCCESS',
-    );
-    if (succeeded) return { ok: true as const, name: 'FINISHED_WITH_RETURN' };
-  }
-
-  for (const source of [receipt, receipt?._transaction]) {
-    const name = executionName(source);
-    if (name === 'FINISHED_WITH_RETURN') return { ok: true as const, name };
-    if (name === 'FINISHED_WITH_ERROR') return { ok: false as const, name };
-  }
-  return { ok: null, name: 'EXECUTION_RESULT_UNAVAILABLE' };
-}
-
-/**
- * The revert reason as the contract wrote it.
+ * The revert reason, in the contract's own words.
  *
- * `consensus_data.leader_receipt[].result` is `{status, payload}`. Only result
- * codes 1 (rollback) and 2 (contract_error) carry a UTF-8 message; every other
- * status carries validator bookkeeping that must never be shown as if the
- * contract had said it.
+ * Field names inside a StudioNet receipt are not something this app should
+ * guess: guessing wrong once already turned a successful `accept_duty` into a
+ * reported refusal. So instead of trusting a path, this walks every string in
+ * the receipt (decoding byte arrays on the way) and returns the first one that
+ * is a sentence `contracts/AuthoritySplit.py` can actually raise. It cannot
+ * invent a message, and it cannot mistake validator bookkeeping for one.
+ *
+ * A user could of course type one of these sentences into a clause, so this is
+ * only ever consulted after a postcondition has already failed — never to
+ * decide whether an action succeeded.
  */
-function decodePayload(result: any): string {
-  const status = Number(result?.status ?? result?.[0]);
-  if (status !== 1 && status !== 2) return '';
-  const payload = result?.payload ?? result?.[1];
-  if (typeof payload === 'string') return payload.trim();
-  if (Array.isArray(payload)) {
-    try {
-      return new TextDecoder().decode(Uint8Array.from(payload)).trim();
-    } catch {
-      return '';
+const CONTRACT_ERRORS = [
+  'Responsible party must differ from the obligee',
+  'Only the named responsible party may accept the duty',
+  'The proposing party cannot countersign its own clause',
+  'No independent determination clause is in force',
+  'An independent determination clause is already in force',
+  'Candidate matches active determination clause',
+  'Agreement semantic evaluation limit reached',
+  'No determination clause is awaiting signature',
+  'Only a party to this agreement may countersign',
+  'Only a party to this agreement may propose',
+  'Only the obligee may reclaim escrow',
+  'Only the obligee may release escrow',
+  'Agreement is not awaiting acceptance',
+  'Determination version limit reached',
+  'Agreement attempt limit reached',
+  'Escrow must be greater than zero',
+  'Refund window must be an integer',
+  'Invalid semantic output schema',
+  'Refund deadline has not passed',
+  'Invalid semantic verdict type',
+  'Agreement is already settled',
+  'Semantic provider failure',
+  'Refund window out of range',
+  'Invalid semantic verdict',
+  'Invalid semantic output',
+  'Invalid chain datetime',
+  'Invalid determination id',
+  'Agreement is not active',
+  'Invalid agreement id',
+  'No escrow to reclaim',
+  'Invalid attempt id',
+  'No escrow to release',
+  'Text cannot be empty',
+  'Invalid address',
+  'Text is too long',
+];
+
+function collectStrings(value: unknown, out: string[], depth = 0): string[] {
+  if (depth > 8 || out.length > 4000) return out;
+  if (typeof value === 'string') {
+    out.push(value);
+  } else if (Array.isArray(value)) {
+    if (value.length && value.every((item) => typeof item === 'number')) {
+      try {
+        out.push(new TextDecoder().decode(Uint8Array.from(value as number[])));
+      } catch {
+        /* not a byte string */
+      }
     }
+    value.forEach((item) => collectStrings(item, out, depth + 1));
+  } else if (value && typeof value === 'object') {
+    Object.values(value as Record<string, unknown>).forEach((item) =>
+      collectStrings(item, out, depth + 1),
+    );
   }
-  return '';
+  return out;
 }
 
-export function executionErrorDetail(receipt: unknown, fallback = 'Contract execution failed.') {
-  for (const entry of leaderReceipts(receipt)) {
-    const message = decodePayload(entry?.result);
-    if (message) return message;
+export function executionErrorDetail(receipt: unknown, fallback = '') {
+  const haystack = collectStrings(receipt, []);
+  for (const text of haystack) {
+    for (const known of CONTRACT_ERRORS) {
+      if (text.includes(known)) return known;
+    }
   }
   return fallback;
 }
@@ -224,20 +227,19 @@ export async function waitFinalized(txHash: `0x${string}`) {
     fullTransaction: true,
   });
 
-  if (executionOutcome(receipt).ok !== null) {
-    console.debug('[AuthoritySplit] finalized receipt', txHash, receipt);
-    return receipt;
-  }
-
+  // `waitForTransactionReceipt` routes a chain with `isStudio` through
+  // `decodeLocalnetTransaction`, which populates fewer fields than
+  // `decodeTransaction`. Fetching the transaction as well gives the revert
+  // scanner more to work with. Both are logged so a reviewer can inspect the
+  // exact shape rather than take this module's word for it.
+  let merged: any = receipt;
   try {
-    const transaction = await readClient.getTransaction({ hash: txHash });
-    const merged = { ...receipt, _transaction: transaction };
-    console.debug('[AuthoritySplit] finalized receipt (+getTransaction)', txHash, merged);
-    return merged;
+    merged = { ...receipt, _transaction: await readClient.getTransaction({ hash: txHash }) };
   } catch {
-    console.debug('[AuthoritySplit] finalized receipt (no transaction)', txHash, receipt);
-    return receipt;
+    /* the receipt alone is enough */
   }
+  console.log('[AuthoritySplit] finalized', txHash, merged);
+  return merged;
 }
 
 /* ----------------------------------------------------------------- format */

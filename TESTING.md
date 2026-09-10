@@ -14,7 +14,14 @@ npm run test:mutations  # 20 mutants; the suite must catch every one
 npm run build           # TypeScript + Vite
 
 npm run check           # all of the above, in order
+npm run check:js        # only the checks that need no Python (verify + build)
 ```
+
+`lint:genvm`, `test:direct` and `test:mutations` go through `scripts/py.mjs`,
+which picks the first interpreter reporting Python 3.12 or newer — `py -3` on
+Windows, `python3` elsewhere — so no script needs editing to run on either
+platform. If no such interpreter exists it says so and points at
+`npm run check:js`, rather than failing with "python3 is not recognized".
 
 `lint` is AST-only and works offline. `genvm_linter.cli check` additionally
 resolves the SDK over the network and will fail in a sandbox without egress —
@@ -193,17 +200,26 @@ The behaviours worth checking by hand, because a build cannot check them:
 2. **A finalized transaction is not reported as success.** Each write re-reads
    finalized state and asserts an action-specific postcondition before the banner
    turns green.
-3. **Revert reasons are the contract's own words.** On StudioNet
-   `waitForTransactionReceipt` does not populate `txExecutionResultName`, so the
-   app reads `consensus_data.leader_receipt` and decodes the payload only for
-   result codes that actually carry a message. Validator bookkeeping is never
-   shown as if the contract had said it.
+3. **The finalized postcondition, not the receipt, decides success.** Each write
+   compares the agreement before and after and requires the exact change that
+   action promises — `agreement_count + 1`, `attempt_count + 1`,
+   `active_determination_id` strictly greater, `status` moving *into*
+   `RELEASED`/`REFUNDED`. A transaction that changed nothing is reported as
+   refused; a transaction that made the change is reported as successful, whatever
+   the receipt looks like. The receipt is scanned only after a postcondition has
+   failed, and only for the fixed list of sentences the contract can raise, so a
+   guessed field name cannot turn a successful write into a reported refusal.
+   Every finalized receipt is also logged to the browser console under
+   `[AuthoritySplit] finalized` so a reviewer can inspect the raw shape.
 4. **No Snap call.** Network selection uses `wallet_switchEthereumChain` with an
    `wallet_addEthereumChain` fallback. `wallet_getSnaps` is never called, so a
    standard MetaMask does not reject the write with
    "method doesn't have corresponding handler".
 5. **Escrow arithmetic is `bigint` throughout.** `genToWei` rejects anything that
    is not a plain decimal amount and never routes a balance through a float.
-6. **Disabled buttons state a rule, they do not enforce it.** Try one of the
-   refused paths anyway with a direct call: the contract reverts, which is the
-   point.
+6. **The interface never enforces a contract rule.** A button is disabled only
+   when the page cannot build the call — no wallet, no agreement loaded, no clause
+   typed. Where a rule would refuse, the app says so in plain words and still
+   sends the transaction, and the banner then shows the contract's own message.
+   That is how the refusal screenshots in §D were produced: from the interface,
+   not from a console.

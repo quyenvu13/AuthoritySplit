@@ -98,10 +98,18 @@ npm run build
 `npm run check` runs all of them in order. `TESTING.md` describes what each check
 proves and how to reproduce the on-chain evidence.
 
-Python toolchain (Python 3.12+):
+The three contract checks need Python 3.12+ and the pinned tools:
 
 ```bash
 pip install -r requirements.txt
+```
+
+`scripts/py.mjs` finds the interpreter for you — `py -3` on Windows, `python3`
+elsewhere — so the same npm scripts work on either platform. Without Python, the
+JavaScript half still runs on its own:
+
+```bash
+npm run check:js        # verify + build
 ```
 
 ## Frontend safety properties
@@ -110,16 +118,22 @@ pip install -r requirements.txt
   never be mistaken for a filled value.
 - Every write is followed by an action-specific finalized-state postcondition. A
   finalized transaction is never reported as success on its own.
-- `waitForTransactionReceipt` on StudioNet does not populate
-  `txExecutionResultName`, so the app reads `consensus_data.leader_receipt`
-  directly and shows the contract's own revert message — decoded only from result
-  codes that actually carry one.
+- **Only finalized state decides whether a write succeeded.** The app never reads
+  a receipt field to make that call: it re-reads the agreement and requires the
+  specific change the action promises, compared against the state before the
+  transaction, so a no-op cannot be reported as a success. The receipt is
+  consulted afterwards, and only to recover the contract's own wording, by
+  matching against the fixed list of sentences `AuthoritySplit.py` can raise. A
+  message the contract cannot emit can therefore never be shown as its answer.
 - Network selection uses `wallet_switchEthereumChain` / `wallet_addEthereumChain`.
   It never calls `wallet_getSnaps`, which a non-Flask MetaMask rejects.
 - Escrow amounts are handled as `bigint` wei end to end; no float ever touches a
   balance.
-- The interface disables an action it knows the contract would refuse, and states
-  the reason — but the gate is the contract, and a refused transaction proves it.
+- **The interface never enforces a contract rule.** A button is disabled only when
+  the page cannot build the call at all. Where a rule would refuse the call, the
+  app predicts the refusal in plain words and still sends it, so the gate a
+  reviewer sees is the chain's answer rather than this app's opinion. Every rule
+  in `LOCKED_SPEC.md` is reachable from the interface.
 
 ## Local development
 
@@ -147,6 +161,7 @@ tests/direct/test_semantic_guards.py      the semantic layer and its bounds
 scripts/mutation_matrix.py       20 mutants; the suite must catch every one
 scripts/verify.mjs               hash parity, artifact and manifest gate
 scripts/checksums.mjs            regenerates FINAL_CHECKSUMS.txt
+scripts/py.mjs                   cross-platform Python 3.12+ launcher
 src/App.tsx                      application screens and postcondition checks
 src/genlayer.ts                  StudioNet reads/writes and execution decoding
 src/config.ts                    deployed address and pinned source hash

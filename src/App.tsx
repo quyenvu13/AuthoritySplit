@@ -13,7 +13,6 @@ import {
   countersignDeterminationTx,
   createAgreementTx,
   executionErrorDetail,
-  executionOutcome,
   genToWei,
   getAgreement,
   getAttempt,
@@ -159,7 +158,6 @@ function TxBanner({ tx }: { tx: TxView | null }) {
       <div>
         <span>{tx.label}</span>
         <strong>{tx.message || tx.phase}</strong>
-        {tx.execution && <small>Execution: {tx.execution}</small>}
       </div>
       {tx.hash && (
         <a href={txExplorerUrl(tx.hash)} target="_blank" rel="noreferrer">
@@ -352,20 +350,26 @@ export default function App() {
       const hash = await send();
       setTx({ phase: 'SUBMITTED', label, hash, message: 'Submitted. Waiting for finalization…' });
       const receipt = await waitFinalized(hash);
-      const outcome = executionOutcome(receipt);
-      if (outcome.ok === false) {
-        throw new Error(executionErrorDetail(receipt, 'The contract refused this action.'));
-      }
       setTx({
         phase: 'FINALIZED',
         label,
         hash,
-        execution: outcome.name,
         message: 'Finalized. Verifying contract state…',
       });
 
-      const summary = await verify(hash);
-      setTx({ phase: 'VERIFIED', label, hash, execution: outcome.name, message: summary });
+      // The finalized postcondition is the only thing allowed to decide whether
+      // this action succeeded. Receipt field names are not something this app
+      // should guess — guessing once already reported a successful accept_duty
+      // as a refusal — so the receipt is consulted only after a postcondition
+      // has failed, and then only to recover the contract's own wording.
+      let summary: string;
+      try {
+        summary = await verify(hash);
+      } catch (postcondition) {
+        throw new Error(executionErrorDetail(receipt, '') || cleanError(postcondition));
+      }
+
+      setTx({ phase: 'VERIFIED', label, hash, message: summary });
       setNotice(summary);
     } catch (error) {
       setTx((current) => ({
@@ -387,9 +391,6 @@ export default function App() {
     const duty = dutyInput.trim();
     if (!/^0x[0-9a-fA-F]{40}$/.test(party)) {
       return setNotice('The responsible party must be a 0x address, not a name.');
-    }
-    if (sameAddress(party, account)) {
-      return setNotice('The responsible party must be a different wallet from the obligee.');
     }
     if (!duty) return setNotice('The duty text is required.');
 
@@ -445,13 +446,20 @@ export default function App() {
   async function handleAccept() {
     if (!account || !agreement) return;
     const id = agreement.agreement_id;
+    const before = agreement;
     await runWrite(
       'Accept duty',
       () => acceptDutyTx(account, id),
       async () => {
         const after = await loadAgreement(id, true);
-        if (!after?.accepted || after.status !== 'ACTIVE') {
-          throw new Error('Finalized state does not show the duty as accepted.');
+        if (!after) throw new Error('Could not re-read the agreement after finalization.');
+        if (before.accepted || after.accepted !== true || after.status !== 'ACTIVE') {
+          throw new Error(
+            'The duty was not accepted by this transaction. The contract refused it: ' +
+              (before.accepted
+                ? 'the agreement was already accepted.'
+                : 'only the named responsible party may accept the duty.'),
+          );
         }
         return `Agreement #${id} is ACTIVE. Both wallets are now bound to the same duty text.`;
       },
@@ -460,10 +468,8 @@ export default function App() {
 
   async function handlePropose(event: FormEvent) {
     event.preventDefault();
-    if (!account) return setNotice('Connect a party wallet first.');
+    if (!account) return setNotice('Connect a wallet first.');
     if (!agreement) return setNotice('Load an agreement first.');
-    if (!isParty) return setNotice('Only the obligee or the responsible party may propose.');
-    if (!isActive) return setNotice('The agreement must be ACTIVE before a clause can be judged.');
     const candidate = candidateInput.trim();
     if (!candidate) return setNotice('Enter a proposed determination clause.');
 
@@ -539,13 +545,22 @@ export default function App() {
   async function handleRelease() {
     if (!account || !agreement) return;
     const id = agreement.agreement_id;
+    const before = agreement;
     await runWrite(
       'Release escrow',
       () => releaseEscrowTx(account, id),
       async () => {
         const after = await loadAgreement(id, true);
-        if (after?.status !== 'RELEASED' || after.escrow_wei !== '0') {
-          throw new Error('Finalized state does not show the escrow as released.');
+        if (!after) throw new Error('Could not re-read the agreement after finalization.');
+        if (before.status === 'RELEASED' || after.status !== 'RELEASED' || after.escrow_wei !== '0') {
+          throw new Error(
+            'The escrow did not move. The contract refused this: ' +
+              (before.active_determination_id === 0
+                ? 'no independent determination clause is in force.'
+                : before.status !== 'ACTIVE'
+                  ? 'the agreement is not active.'
+                  : 'only the obligee may release escrow.'),
+          );
         }
         return `Escrow paid to the responsible party. Agreement #${id} is RELEASED.`;
       },
@@ -555,18 +570,103 @@ export default function App() {
   async function handleRefund() {
     if (!account || !agreement) return;
     const id = agreement.agreement_id;
+    const before = agreement;
     await runWrite(
       'Reclaim escrow',
       () => refundEscrowTx(account, id),
       async () => {
         const after = await loadAgreement(id, true);
-        if (after?.status !== 'REFUNDED' || after.escrow_wei !== '0') {
-          throw new Error('Finalized state does not show the escrow as reclaimed.');
+        if (!after) throw new Error('Could not re-read the agreement after finalization.');
+        if (before.status === 'REFUNDED' || after.status !== 'REFUNDED' || after.escrow_wei !== '0') {
+          throw new Error(
+            'The escrow did not move. The contract refused this: ' +
+              (before.active_determination_id > 0
+                ? 'an independent determination clause is already in force.'
+                : !refundDue
+                  ? 'the refund deadline has not passed.'
+                  : 'only the obligee may reclaim escrow, and only before settlement.'),
+          );
         }
         return `Escrow returned to the obligee. Agreement #${id} is REFUNDED.`;
       },
     );
   }
+
+  /**
+   * The four state-changing buttons on the agreement page.
+   *
+   * `blocked` is structural only — the page has nothing to send. `refusal`
+   * predicts what the contract will say, and the button stays live so a reviewer
+   * can send the transaction and read the refusal from the chain rather than
+   * from this app. Every rule in the spec is reachable this way.
+   */
+  const ACTIONS = [
+    {
+      key: 'accept',
+      title: 'Accept the duty',
+      body: 'Responsible party only. This is the second signature; it moves the agreement to ACTIVE.',
+      label: 'Accept duty',
+      tone: 'primary',
+      blocked: () => !agreement,
+      refusal: () => {
+        if (!agreement) return null;
+        if (agreement.status !== 'AWAITING_ACCEPTANCE') return 'the agreement is not awaiting acceptance.';
+        if (!isResponsible) return 'only the named responsible party may accept the duty.';
+        return null;
+      },
+      run: handleAccept,
+    },
+    {
+      key: 'countersign',
+      title: 'Countersign the pending clause',
+      body: 'The party that did not propose it. Consensus alone never puts a clause in force.',
+      label: 'Countersign',
+      tone: 'primary',
+      blocked: () => !agreement,
+      refusal: () => {
+        if (!agreement) return null;
+        if (!isActive) return 'the agreement is not active.';
+        if (!hasPending) return 'no determination clause is awaiting signature.';
+        if (!isParty) return 'only a party to this agreement may countersign.';
+        if (pendingIsMine) return 'the proposing party cannot countersign its own clause.';
+        return null;
+      },
+      run: handleCountersign,
+    },
+    {
+      key: 'release',
+      title: 'Release escrow to the responsible party',
+      body: 'Obligee only, and only while an independent determination clause is in force.',
+      label: agreement ? `Release ${weiToGen(agreement.escrow_wei)} GEN` : 'Release escrow',
+      tone: 'primary',
+      blocked: () => !agreement,
+      refusal: () => {
+        if (!agreement) return null;
+        if (!isObligee) return 'only the obligee may release escrow.';
+        if (!isActive) return 'the agreement is not active.';
+        if (!determinationInForce) return 'no independent determination clause is in force.';
+        return null;
+      },
+      run: handleRelease,
+    },
+    {
+      key: 'refund',
+      title: 'Reclaim escrow',
+      body: 'Obligee only, after the refund window, and only while no determination is in force.',
+      label: 'Reclaim',
+      tone: 'secondary',
+      blocked: () => !agreement,
+      refusal: () => {
+        if (!agreement) return null;
+        if (!isObligee) return 'only the obligee may reclaim escrow.';
+        if (!escrowLocked) return 'the agreement is already settled.';
+        if (determinationInForce) return 'an independent determination clause is already in force.';
+        if (!refundDue) return 'the refund deadline has not passed.';
+        return null;
+      },
+      run: handleRefund,
+    },
+  ];
 
   const agreementTitle = agreement ? `Agreement #${agreement.agreement_id}` : 'No agreement loaded';
 
@@ -763,6 +863,12 @@ export default function App() {
                   </select>
                   <small>Measured from the consensus clock, not the browser clock.</small>
                 </label>
+                {account && sameAddress(partyInput, account) && (
+                  <p className="will-refuse">
+                    The contract will refuse this: the responsible party must differ from the
+                    obligee. Send it anyway to see the refusal come back from the chain.
+                  </p>
+                )}
                 <div className="form-footer">
                   <div><span>Obligee wallet</span><strong>{account ? short(account, 9, 7) : 'Connect wallet first'}</strong></div>
                   <button className="primary" type="submit" disabled={busy || !account}>Fund and create →</button>
@@ -862,70 +968,32 @@ export default function App() {
                     <SectionHead
                       eyebrow="CONSEQUENCE"
                       title="What this wallet may do right now"
-                      body="Every button below is gated by the contract, not by the interface. A disabled button explains a rule; a refused transaction proves it."
+                      body="A button is disabled only when this page cannot build the call at all. Every rule below belongs to the contract, so the interface predicts the refusal and still lets you send it — the gate you see is the chain's, not this app's."
                     />
-                    <div className="action-row">
-                      <div>
-                        <strong>Accept the duty</strong>
-                        <p>Responsible party only. Binds the second signature and activates the agreement.</p>
-                      </div>
-                      <button
-                        type="button"
-                        className="primary"
-                        disabled={busy || !account || !isResponsible || agreement.status !== 'AWAITING_ACCEPTANCE'}
-                        onClick={() => void handleAccept()}
-                      >
-                        Accept duty
-                      </button>
-                    </div>
-                    <div className="action-row">
-                      <div>
-                        <strong>Countersign the pending clause</strong>
-                        <p>The party that did not propose it. Consensus alone never puts a clause in force.</p>
-                      </div>
-                      <button
-                        type="button"
-                        className="primary"
-                        disabled={busy || !account || !isParty || !hasPending || pendingIsMine || !isActive}
-                        onClick={() => void handleCountersign()}
-                      >
-                        Countersign
-                      </button>
-                    </div>
-                    <div className="action-row">
-                      <div>
-                        <strong>Release escrow to the responsible party</strong>
-                        <p>
-                          Obligee only, and only while an independent determination is in force.
-                          {determinationInForce ? '' : ' No determination is in force, so this is refused.'}
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        className="primary"
-                        disabled={busy || !account || !isObligee || !isActive || !determinationInForce}
-                        onClick={() => void handleRelease()}
-                      >
-                        Release {weiToGen(agreement.escrow_wei)} GEN
-                      </button>
-                    </div>
-                    <div className="action-row">
-                      <div>
-                        <strong>Reclaim escrow</strong>
-                        <p>
-                          Obligee only, after the refund window, and only while no determination is in
-                          force.{refundDue ? '' : ' The window has not elapsed yet.'}
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        className="secondary"
-                        disabled={busy || !account || !isObligee || !escrowLocked || determinationInForce || !refundDue}
-                        onClick={() => void handleRefund()}
-                      >
-                        Reclaim
-                      </button>
-                    </div>
+                    {ACTIONS.map((action) => {
+                      const refusal = action.refusal();
+                      return (
+                        <div className="action-row" key={action.key}>
+                          <div>
+                            <strong>{action.title}</strong>
+                            <p>{action.body}</p>
+                            {refusal && (
+                              <p className="will-refuse">
+                                The contract will refuse this: {refusal}
+                              </p>
+                            )}
+                          </div>
+                          <button
+                            type="button"
+                            className={action.tone}
+                            disabled={busy || !account || action.blocked()}
+                            onClick={() => void action.run()}
+                          >
+                            {action.label}
+                          </button>
+                        </div>
+                      );
+                    })}
                   </section>
 
                   <section className="workspace-actions">
@@ -990,20 +1058,35 @@ export default function App() {
                   />
                   <small>{candidateInput.length} / 4000</small>
                 </label>
+                {agreement && !isParty && (
+                  <p className="will-refuse">
+                    The contract will refuse this: only a party to this agreement may propose.
+                    Send it anyway to see the refusal come back from the chain.
+                  </p>
+                )}
+                {agreement && isParty && !isActive && (
+                  <p className="will-refuse">
+                    The contract will refuse this: the agreement is not active.
+                  </p>
+                )}
                 <div className="form-footer stacked-mobile">
                   <div>
-                    <span>Write permission</span>
+                    <span>Expected outcome</span>
                     <strong>
                       {!agreement
                         ? 'Load agreement'
                         : !isParty
-                          ? 'A party wallet is required'
+                          ? 'Refused — not a party'
                           : !isActive
-                            ? 'Agreement must be ACTIVE'
-                            : 'Authorized'}
+                            ? 'Refused — not active'
+                            : 'Sent to consensus'}
                     </strong>
                   </div>
-                  <button className="primary" type="submit" disabled={busy || !agreement || !account || !isParty || !isActive}>
+                  <button
+                    className="primary"
+                    type="submit"
+                    disabled={busy || !agreement || !account || !candidateInput.trim()}
+                  >
                     Run determination →
                   </button>
                 </div>
