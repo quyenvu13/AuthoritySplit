@@ -2,127 +2,160 @@
 
 <p align="center"><img src="public/AuthoritySplit-logo-512.png" alt="AuthoritySplit logo" width="180" /></p>
 
-AuthoritySplit is a GenLayer application powered by the frozen `SelfJudgingGuard` Intelligent Contract. It enforces one narrow governance rule:
+**Escrowed funds cannot move through an agreement whose compliance verdict the obligor controls.**
 
-> The party responsible for a duty should not have unilateral decisive control over the final determination of whether that same duty was satisfied, triggered, breached, or complied with.
+Two wallets sign one immutable duty and lock real GEN behind it. Either party may
+propose the *determination clause* — the rule that decides who judges whether the
+duty was met. GenLayer validators answer exactly one question about that clause:
 
-The semantic validator answers only that authority-separation question. The contract applies the consequence deterministically.
+> Does it give the responsible party, or anything the responsible party controls
+> unilaterally, decisive power over the final determination of its own compliance?
 
-## Project deployment
+`SELF_JUDGING_AUTHORITY` blocks the clause permanently and **mutual consent cannot
+override it** — the responsible party cannot buy the right to judge itself by
+persuading its counterparty to sign. `INDEPENDENT_DETERMINATION` only queues the
+clause for the other party's signature; consensus alone activates nothing.
 
-Frontend target / clean project deployment:
+Escrow releases only while an independent determination is in force. That is the
+consequence: not a counter, not a log entry — the money.
 
-`0xA614c22Ea5bF0bAc17338a9539514fa6d2b050Ef`
+---
 
-Explorer:
+## The flow
 
-`https://explorer-studio.genlayer.com/address/0xA614c22Ea5bF0bAc17338a9539514fa6d2b050Ef`
+| # | Write | Caller | What it does |
+|---|---|---|---|
+| 1 | `create_agreement(responsible_party_hex, duty_text, refund_window_seconds)` | obligee, payable | Locks escrow, names a **different** wallet as responsible party, freezes the duty text, starts the refund window. |
+| 2 | `accept_duty(agreement_id)` | responsible party | The second signature. `AWAITING_ACCEPTANCE → ACTIVE`. |
+| 3 | `propose_determination(agreement_id, candidate_clause)` | either party | The one semantic call. Blocks a self-judging clause; queues an independent one. |
+| 4 | `countersign_determination(agreement_id)` | the *other* party | Puts the queued clause in force as a new version. The proposer cannot sign its own. |
+| 5 | `release_escrow(agreement_id)` | obligee | Pays the responsible party. **Refused unless a determination is in force.** |
+| 6 | `refund_escrow(agreement_id)` | obligee | Returns the escrow after the window. **Refused once a determination is in force.** |
 
-Frozen contract source SHA256:
+Reads: `get_config`, `get_agreement`, `get_determination`, `get_attempt`,
+`get_attempts` — all return JSON strings from finalized state.
 
-`ce722d4e1708b900ceff3fa8d3ff2233a12f2e3315911dda88e0ccc65c9b2139`
+## Why this needs GenLayer
 
-Contract version: `1.2`
+The question is about meaning, not about data. "Determined by the vendor in its
+sole discretion" and "determined by a monitoring service the vendor may replace at
+will" are different sentences with the same meta-right; "determined by a
+jointly-appointed auditor whose findings are final" is the opposite. No keyword
+list separates those, and no oracle can be asked. A validator reading the clause
+can.
 
-## Separate runtime-evidence deployment
-
-The load-bearing runtime checks were performed on a separate StudioNet deployment so the project address could remain clean:
-
-`0xD7E04011737411f02315D1864956Ec739049ccf1`
-
-Explorer:
-
-`https://explorer-studio.genlayer.com/address/0xD7E04011737411f02315D1864956Ec739049ccf1`
-
-See `TESTING.md` for the recorded runtime behavior.
-
-## Product flow
-
-1. **Create workspace** — the caller becomes the immutable workspace authority and records a responsible-party label plus duty.
-2. **Propose determination** — only that authority can propose the clause that controls the final compliance determination.
-3. **Semantic classification** — validators return exactly `INDEPENDENT_DETERMINATION` or `SELF_JUDGING_AUTHORITY`.
-4. **Deterministic consequence** — independent clauses are versioned and activated; self-judging clauses are blocked.
-5. **Audit trail** — attempts record verdict, consequence, and whether the workspace-scoped semantic cache was reused.
+Everything downstream of that one answer is deterministic contract code: which
+counter moves, which clause becomes active, and whether the escrow may leave.
 
 ## Honest scope
 
-AuthoritySplit does **not** decide whether the underlying duty was actually performed. It does not determine damages, remedies, legal liability, commercial reasonableness, or external-world truth.
+AuthoritySplit does **not** decide:
 
-The semantic question is only whether the responsible party has unilateral decisive control over the final compliance determination.
+- whether the duty was actually performed;
+- whether the duty is fair, lawful, or commercially reasonable;
+- damages, remedies, or who should win a dispute;
+- any external fact that is not written in the clause itself.
 
-## Frontend safety properties
+Two further limits, stated because a reviewer would find them anyway:
 
-- Transaction forms are empty by default.
-- Runtime evidence is never prefilled into write forms.
-- Reads used for postconditions request finalized state.
-- The UI does not treat `FINALIZED` alone as execution success.
-- After a write, the UI verifies an action-specific finalized-state postcondition before displaying success.
-- Once a transaction ID exists, the UI tracks that ID instead of blindly retrying the write.
-- The project address and runtime-evidence address are displayed separately.
-- The frontend checks the live `SelfJudgingGuard` contract profile (version `1.2`, semantic cap `8`) before showing source-profile parity.
+- **The classification is of text, not of the world.** A clause naming an
+  "independent auditor" that the responsible party secretly controls is classified
+  from what the clause says. The contract cannot see the off-chain relationship.
+- **The semantic layer is bounded.** Eight fresh classifications per agreement,
+  after which proposals are refused rather than re-judged, and identical
+  resubmissions reuse the cached verdict instead of rerolling it. This is the
+  anti-verdict-shopping property; it also means the model is consulted far less
+  often than the attempt count suggests.
 
-## Local development
+The prompt fence neutralises angle brackets and strips the verdict labels from the
+model-facing copy of user text. It is hardening, not a proof of injection
+resistance; validator reruns provide the convergence discipline.
 
-Requirements: Node.js 18+ and npm.
+## Deployment
+
+| | |
+|---|---|
+| Contract | `contracts/AuthoritySplit.py` |
+| Source SHA-256 | `b13978e8fd162ac7fb88764aeff40eae8d84eb790865c05ab73bc94c2660d2d1` |
+| Contract version | `2.0` (`get_config().version`) |
+| Network | GenLayer StudioNet (chain `61999`) |
+| Address | [`0x6c743D9b9c4fdE8e8083125c908E14e7234Ce2be`](https://explorer-studio.genlayer.com/address/0x6c743D9b9c4fdE8e8083125c908E14e7234Ce2be) |
+
+`npm run verify` recomputes the contract hash and fails if `src/config.ts`, the
+contract version, the semantic budget, or `FINAL_CHECKSUMS.txt` disagree with it.
+
+## Verification
 
 ```bash
 npm install
-npm run verify
-npm run dev
-```
-
-Build:
-
-```bash
+npm run verify          # hash parity, no build artifacts, full checksum manifest
+npm run lint:genvm      # GenVM linter, AST-only, offline
+npm run test:direct     # 28 checks on a pinned GenVM build
+npm run test:mutations  # 20 mutants, all must be caught
 npm run build
 ```
 
-The frontend uses `genlayer-js` and StudioNet. A browser wallet is required for writes.
+`npm run check` runs all of them in order. `TESTING.md` describes what each check
+proves and how to reproduce the on-chain evidence.
 
-## Optional contract override
-
-The production project address is checked into `src/config.ts`. For an intentional alternate deployment, set:
+Python toolchain (Python 3.12+):
 
 ```bash
-VITE_CONTRACT_ADDRESS=0x...
+pip install -r requirements.txt
 ```
 
-Do not use an alternate address as submission evidence unless its exact deployed source and state have been verified independently.
+## Frontend safety properties
 
-## Contract methods surfaced by the UI
+- Transaction forms start empty; placeholders are prefixed `e.g.` so a hint can
+  never be mistaken for a filled value.
+- Every write is followed by an action-specific finalized-state postcondition. A
+  finalized transaction is never reported as success on its own.
+- `waitForTransactionReceipt` on StudioNet does not populate
+  `txExecutionResultName`, so the app reads `consensus_data.leader_receipt`
+  directly and shows the contract's own revert message — decoded only from result
+  codes that actually carry one.
+- Network selection uses `wallet_switchEthereumChain` / `wallet_addEthereumChain`.
+  It never calls `wallet_getSnaps`, which a non-Flask MetaMask rejects.
+- Escrow amounts are handled as `bigint` wei end to end; no float ever touches a
+  balance.
+- The interface disables an action it knows the contract would refuse, and states
+  the reason — but the gate is the contract, and a refused transaction proves it.
 
-Writes:
+## Local development
 
-- `create_workspace(responsible_party_label, duty_text)`
-- `propose_determination(workspace_id, candidate_clause)`
+Requirements: Node.js 18+, npm, Python 3.12+.
 
-Reads:
+```bash
+npm install
+npm run dev
+```
 
-- `get_config()`
-- `get_workspace(workspace_id)`
-- `get_determination(determination_id)`
-- `get_attempt(workspace_id, attempt_id)`
-- `get_attempts(workspace_id, from_id, count)`
+A browser wallet on StudioNet is required for writes. To point the app at a
+different deployment:
 
-## Branding
-
-Project/product name: `AuthoritySplit`
-
-Frozen Intelligent Contract name: `SelfJudgingGuard`
-
-Logo assets:
-
-- `public/logo.svg`
-- `public/AuthoritySplit-logo-512.png`
+```bash
+VITE_CONTRACT_ADDRESS=0x... npm run dev
+```
 
 ## Repository structure
 
 ```text
-contracts/SelfJudgingGuard.py   frozen Intelligent Contract source
-src/App.tsx                     application screens and postcondition checks
-src/genlayer.ts                 StudioNet reads/writes and execution checks
-src/config.ts                   deployed addresses and frozen source hash
-src/styles.css                  responsive visual system
-scripts/verify.mjs              source/config/package integrity checks
-TESTING.md                      runtime and frontend verification guide
+contracts/AuthoritySplit.py    the Intelligent Contract
+tests/direct/conftest.py         pinned GenVM version and shared fixtures
+tests/direct/test_escrow_consequence.py   the money path and the party gates
+tests/direct/test_semantic_guards.py      the semantic layer and its bounds
+scripts/mutation_matrix.py       20 mutants; the suite must catch every one
+scripts/verify.mjs               hash parity, artifact and manifest gate
+scripts/checksums.mjs            regenerates FINAL_CHECKSUMS.txt
+src/App.tsx                      application screens and postcondition checks
+src/genlayer.ts                  StudioNet reads/writes and execution decoding
+src/config.ts                    deployed address and pinned source hash
+LOCKED_SPEC.md                   the frozen behavioural specification
+TESTING.md                       what each check proves, and how to re-run it
+FINAL_CHECKSUMS.txt              SHA-256 of every tracked file
 ```
+
+## Branding
+
+Project name and contract name are the same: `AuthoritySplit`.
+Logo assets: `public/logo.svg`, `public/AuthoritySplit-logo-512.png`.

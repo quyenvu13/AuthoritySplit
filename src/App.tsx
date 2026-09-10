@@ -1,38 +1,57 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useState } from 'react';
 import {
   CONTRACT_ADDRESS,
   CONTRACT_EXPLORER_URL,
   EXPECTED_CONTRACT_VERSION,
-  RUNTIME_EVIDENCE_ADDRESS,
-  RUNTIME_EXPLORER_URL,
+  EXPECTED_SEMANTIC_BUDGET,
   SOURCE_SHA256,
 } from './config';
 import {
+  acceptDutyTx,
   cleanError,
   connectWallet,
-  createWorkspaceTx,
+  countersignDeterminationTx,
+  createAgreementTx,
   executionErrorDetail,
   executionOutcome,
+  genToWei,
+  getAgreement,
   getAttempt,
   getAttempts,
   getConfig,
   getDetermination,
-  getWorkspace,
   proposeDeterminationTx,
+  refundEscrowTx,
+  releaseEscrowTx,
   txExplorerUrl,
   waitFinalized,
+  weiToGen,
 } from './genlayer';
-import type { Address, Attempt, Determination, GuardConfig, TxView, Workspace } from './types';
+import type {
+  Address,
+  Agreement,
+  Attempt,
+  Determination,
+  GuardConfig,
+  TxView,
+} from './types';
 
-type Page = 'overview' | 'create' | 'workspace' | 'propose' | 'audit' | 'verification';
+type Page = 'overview' | 'create' | 'agreement' | 'propose' | 'audit' | 'verification';
 
 const PAGES: Array<{ id: Page; label: string; kicker: string }> = [
   { id: 'overview', label: 'Overview', kicker: 'Protocol' },
-  { id: 'create', label: 'Create workspace', kicker: 'Authority' },
-  { id: 'workspace', label: 'Workspace', kicker: 'State' },
-  { id: 'propose', label: 'Propose clause', kicker: 'Decision' },
+  { id: 'create', label: 'Create agreement', kicker: 'Escrow' },
+  { id: 'agreement', label: 'Agreement', kicker: 'State' },
+  { id: 'propose', label: 'Determination', kicker: 'Decision' },
   { id: 'audit', label: 'Attempt log', kicker: 'Audit' },
   { id: 'verification', label: 'Verification', kicker: 'Proof' },
+];
+
+const WINDOW_CHOICES: Array<{ label: string; seconds: number }> = [
+  { label: '1 hour', seconds: 3600 },
+  { label: '1 day', seconds: 86400 },
+  { label: '7 days', seconds: 604800 },
+  { label: '30 days', seconds: 2592000 },
 ];
 
 function short(value?: string, left = 6, right = 4) {
@@ -67,6 +86,20 @@ function verdictClass(value?: string) {
   if (value === 'INDEPENDENT_DETERMINATION') return 'verdict good';
   if (value === 'SELF_JUDGING_AUTHORITY') return 'verdict blocked';
   return 'verdict neutral';
+}
+
+function statusClass(status?: string) {
+  if (status === 'ACTIVE') return 'verdict good';
+  if (status === 'RELEASED') return 'verdict good';
+  if (status === 'REFUNDED') return 'verdict blocked';
+  return 'verdict neutral';
+}
+
+function deadlineText(unix: number) {
+  if (!unix) return '—';
+  const when = new Date(unix * 1000);
+  const overdue = Date.now() / 1000 >= unix;
+  return `${when.toISOString().replace('T', ' ').slice(0, 16)} UTC${overdue ? ' · elapsed' : ''}`;
 }
 
 function SectionHead({ eyebrow, title, body }: { eyebrow: string; title: string; body?: string }) {
@@ -141,14 +174,19 @@ export default function App() {
   const [page, setPage] = useState<Page>(() => routeFromHash());
   const [config, setConfig] = useState<GuardConfig | null>(null);
   const [account, setAccount] = useState<Address | null>(null);
-  const [workspaceIdInput, setWorkspaceIdInput] = useState('');
-  const [workspace, setWorkspace] = useState<Workspace | null>(null);
+
+  const [agreementIdInput, setAgreementIdInput] = useState('');
+  const [agreement, setAgreement] = useState<Agreement | null>(null);
   const [attempts, setAttempts] = useState<Attempt[]>([]);
   const [activeDetermination, setActiveDetermination] = useState<Determination | null>(null);
   const [latestAttempt, setLatestAttempt] = useState<Attempt | null>(null);
-  const [labelInput, setLabelInput] = useState('');
+
+  const [partyInput, setPartyInput] = useState('');
   const [dutyInput, setDutyInput] = useState('');
+  const [escrowInput, setEscrowInput] = useState('');
+  const [windowInput, setWindowInput] = useState(String(WINDOW_CHOICES[1].seconds));
   const [candidateInput, setCandidateInput] = useState('');
+
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
   const [tx, setTx] = useState<TxView | null>(null);
@@ -164,16 +202,16 @@ export default function App() {
     }
   }, []);
 
-  const loadWorkspace = useCallback(async (id: number, quiet = false) => {
+  const loadAgreement = useCallback(async (id: number, quiet = false) => {
     if (!Number.isInteger(id) || id <= 0) {
-      if (!quiet) setNotice('Enter a workspace ID greater than zero.');
+      if (!quiet) setNotice('Enter an agreement ID greater than zero.');
       return null;
     }
 
     try {
-      const next = await getWorkspace(id);
-      setWorkspace(next);
-      setWorkspaceIdInput(String(id));
+      const next = await getAgreement(id);
+      setAgreement(next);
+      setAgreementIdInput(String(id));
 
       if (next.active_determination_id > 0) {
         try {
@@ -205,10 +243,10 @@ export default function App() {
         setLatestAttempt(null);
       }
 
-      if (!quiet) setNotice(`Loaded Workspace #${id} from finalized state.`);
+      if (!quiet) setNotice(`Loaded Agreement #${id} from finalized state.`);
       return next;
     } catch (error) {
-      setWorkspace(null);
+      setAgreement(null);
       setAttempts([]);
       setActiveDetermination(null);
       setLatestAttempt(null);
@@ -219,16 +257,18 @@ export default function App() {
 
   useEffect(() => {
     void loadConfig();
-    if (window.ethereum) {
-      window.ethereum
-        .request({ method: 'eth_accounts' })
-        .then((value) => {
-          const accounts = value as string[];
-          if (accounts?.[0]) setAccount(accounts[0] as Address);
-        })
-        .catch(() => undefined);
-    }
   }, [loadConfig]);
+
+  useEffect(() => {
+    if (!window.ethereum) return;
+    window.ethereum
+      .request({ method: 'eth_accounts' })
+      .then((value) => {
+        const accounts = value as string[];
+        if (accounts?.[0]) setAccount(accounts[0] as Address);
+      })
+      .catch(() => undefined);
+  }, []);
 
   useEffect(() => {
     const onHash = () => setPage(routeFromHash());
@@ -253,15 +293,29 @@ export default function App() {
 
   const sourceParityOk = Boolean(
     config &&
-      config.name === 'SelfJudgingGuard' &&
+      config.name === 'AuthoritySplit' &&
       config.version === EXPECTED_CONTRACT_VERSION &&
-      config.max_semantic_evals_per_workspace === 8,
+      config.max_semantic_evals_per_agreement === EXPECTED_SEMANTIC_BUDGET,
   );
 
-  const isAuthority = sameAddress(account, workspace?.authority);
-  const semanticBudgetRemaining = workspace && config
-    ? Math.max(0, config.max_semantic_evals_per_workspace - workspace.semantic_eval_count)
-    : 0;
+  const isObligee = sameAddress(account, agreement?.obligee);
+  const isResponsible = sameAddress(account, agreement?.responsible_party);
+  const isParty = isObligee || isResponsible;
+  const isActive = agreement?.status === 'ACTIVE';
+  const hasPending = Boolean(agreement?.pending_clause_text);
+  const pendingIsMine = sameAddress(account, agreement?.pending_proposed_by);
+  const escrowLocked = Boolean(
+    agreement && (agreement.status === 'AWAITING_ACCEPTANCE' || agreement.status === 'ACTIVE'),
+  );
+  const determinationInForce = Boolean(agreement && agreement.active_determination_id > 0);
+  const refundDue = Boolean(
+    agreement && agreement.refund_deadline_unix > 0 &&
+      Date.now() / 1000 >= agreement.refund_deadline_unix,
+  );
+  const semanticBudgetRemaining =
+    agreement && config
+      ? Math.max(0, config.max_semantic_evals_per_agreement - agreement.semantic_eval_count)
+      : 0;
 
   const go = (next: Page) => {
     setRoute(next);
@@ -279,51 +333,44 @@ export default function App() {
     }
   }
 
-  async function handleCreate(event: FormEvent) {
-    event.preventDefault();
+  /**
+   * One write path for every transaction.
+   *
+   * `send` submits, `verify` re-reads finalized state and throws if the
+   * postcondition this specific action promises is not present. A finalized
+   * transaction is never reported as success on its own.
+   */
+  async function runWrite(
+    label: string,
+    send: () => Promise<`0x${string}`>,
+    verify: (hash: `0x${string}`) => Promise<string>,
+  ) {
     if (busy) return;
-    if (!account) return setNotice('Connect the workspace authority wallet first.');
-    const label = labelInput.trim();
-    const duty = dutyInput.trim();
-    if (!label || !duty) return setNotice('Responsible party and duty are both required.');
-
     setBusy(true);
-    setTx({ phase: 'SUBMITTED', label: 'Create workspace', message: 'Preparing transaction…' });
+    setTx({ phase: 'SUBMITTED', label, message: 'Preparing transaction…' });
     try {
-      const before = await getConfig();
-      const hash = await createWorkspaceTx(account, label, duty);
-      setTx({ phase: 'SUBMITTED', label: 'Create workspace', hash, message: 'Submitted. Waiting for finalization…' });
+      const hash = await send();
+      setTx({ phase: 'SUBMITTED', label, hash, message: 'Submitted. Waiting for finalization…' });
       const receipt = await waitFinalized(hash);
       const outcome = executionOutcome(receipt);
-      if (outcome.ok !== true) {
-        throw new Error(executionErrorDetail(receipt, `Execution not proven successful: ${outcome.name}`));
+      if (outcome.ok === false) {
+        throw new Error(executionErrorDetail(receipt, 'The contract refused this action.'));
       }
-      setTx({ phase: 'FINALIZED', label: 'Create workspace', hash, execution: outcome.name, message: 'Finalized. Verifying contract state…' });
+      setTx({
+        phase: 'FINALIZED',
+        label,
+        hash,
+        execution: outcome.name,
+        message: 'Finalized. Verifying contract state…',
+      });
 
-      const after = await getConfig();
-      if (after.workspace_count !== before.workspace_count + 1) {
-        throw new Error('Finalized create did not increase workspace_count by exactly one.');
-      }
-      const created = await getWorkspace(after.workspace_count);
-      if (!sameAddress(created.authority, account) || created.responsible_party_label !== label || created.duty_text !== duty) {
-        throw new Error('Finalized workspace state does not match the submitted authority, label, and duty.');
-      }
-
-      setConfig(after);
-      setWorkspace(created);
-      setWorkspaceIdInput(String(created.workspace_id));
-      setAttempts([]);
-      setLatestAttempt(null);
-      setActiveDetermination(null);
-      setLabelInput('');
-      setDutyInput('');
-      setTx({ phase: 'VERIFIED', label: 'Create workspace', hash, execution: outcome.name, message: `Workspace #${created.workspace_id} verified in finalized state.` });
-      setNotice(`Workspace #${created.workspace_id} created and verified.`);
-      go('workspace');
+      const summary = await verify(hash);
+      setTx({ phase: 'VERIFIED', label, hash, execution: outcome.name, message: summary });
+      setNotice(summary);
     } catch (error) {
       setTx((current) => ({
         phase: 'ERROR',
-        label: 'Create workspace',
+        label,
         hash: current?.hash,
         message: cleanError(error),
       }));
@@ -331,75 +378,197 @@ export default function App() {
     } finally {
       setBusy(false);
     }
+  }
+
+  async function handleCreate(event: FormEvent) {
+    event.preventDefault();
+    if (!account) return setNotice('Connect the obligee wallet first.');
+    const party = partyInput.trim();
+    const duty = dutyInput.trim();
+    if (!/^0x[0-9a-fA-F]{40}$/.test(party)) {
+      return setNotice('The responsible party must be a 0x address, not a name.');
+    }
+    if (sameAddress(party, account)) {
+      return setNotice('The responsible party must be a different wallet from the obligee.');
+    }
+    if (!duty) return setNotice('The duty text is required.');
+
+    let parsed: bigint | null = null;
+    let parseError = '';
+    try {
+      parsed = genToWei(escrowInput);
+    } catch (error) {
+      parseError = cleanError(error);
+    }
+    if (parsed === null) return setNotice(parseError);
+    if (parsed <= 0n) return setNotice('Escrow must be greater than zero.');
+    const escrowWei: bigint = parsed;
+
+    const seconds = Number(windowInput);
+
+    let countBefore = 0;
+    try {
+      countBefore = (await getConfig()).agreement_count;
+    } catch (error) {
+      return setNotice(`Could not read the contract before writing: ${cleanError(error)}`);
+    }
+
+    await runWrite(
+      'Create agreement',
+      () => createAgreementTx(account, party, duty, seconds, escrowWei),
+      async () => {
+        const after = await getConfig();
+        if (after.agreement_count !== countBefore + 1) {
+          throw new Error('Finalized create did not increase agreement_count by exactly one.');
+        }
+        const created = await getAgreement(after.agreement_count);
+        if (
+          !sameAddress(created.obligee, account) ||
+          !sameAddress(created.responsible_party, party) ||
+          created.duty_text !== duty ||
+          created.escrow_wei !== escrowWei.toString() ||
+          created.status !== 'AWAITING_ACCEPTANCE'
+        ) {
+          throw new Error('Finalized agreement state does not match what was submitted.');
+        }
+        setConfig(after);
+        setPartyInput('');
+        setDutyInput('');
+        setEscrowInput('');
+        await loadAgreement(created.agreement_id, true);
+        go('agreement');
+        return `Agreement #${created.agreement_id} created with ${weiToGen(created.escrow_wei)} GEN in escrow, awaiting acceptance.`;
+      },
+    );
+  }
+
+  async function handleAccept() {
+    if (!account || !agreement) return;
+    const id = agreement.agreement_id;
+    await runWrite(
+      'Accept duty',
+      () => acceptDutyTx(account, id),
+      async () => {
+        const after = await loadAgreement(id, true);
+        if (!after?.accepted || after.status !== 'ACTIVE') {
+          throw new Error('Finalized state does not show the duty as accepted.');
+        }
+        return `Agreement #${id} is ACTIVE. Both wallets are now bound to the same duty text.`;
+      },
+    );
   }
 
   async function handlePropose(event: FormEvent) {
     event.preventDefault();
-    if (busy) return;
-    if (!account) return setNotice('Connect the workspace authority wallet first.');
-    if (!workspace) return setNotice('Load a workspace first.');
-    if (!isAuthority) return setNotice('The connected wallet is not this workspace authority.');
+    if (!account) return setNotice('Connect a party wallet first.');
+    if (!agreement) return setNotice('Load an agreement first.');
+    if (!isParty) return setNotice('Only the obligee or the responsible party may propose.');
+    if (!isActive) return setNotice('The agreement must be ACTIVE before a clause can be judged.');
     const candidate = candidateInput.trim();
     if (!candidate) return setNotice('Enter a proposed determination clause.');
 
-    setBusy(true);
-    setTx({ phase: 'SUBMITTED', label: 'Propose determination', message: 'Preparing transaction…' });
-    try {
-      const before = await getWorkspace(workspace.workspace_id);
-      const hash = await proposeDeterminationTx(account, workspace.workspace_id, candidate);
-      setTx({ phase: 'SUBMITTED', label: 'Propose determination', hash, message: 'Submitted. Waiting for finalization…' });
-      const receipt = await waitFinalized(hash);
-      const outcome = executionOutcome(receipt);
-      if (outcome.ok !== true) {
-        throw new Error(executionErrorDetail(receipt, `Execution not proven successful: ${outcome.name}`));
-      }
-      setTx({ phase: 'FINALIZED', label: 'Propose determination', hash, execution: outcome.name, message: 'Finalized. Verifying consequence…' });
+    const id = agreement.agreement_id;
+    const before = agreement;
 
-      const after = await getWorkspace(workspace.workspace_id);
-      if (after.attempt_count !== before.attempt_count + 1) {
-        throw new Error('Finalized proposal did not create exactly one attempt.');
-      }
-      const attempt = await getAttempt(workspace.workspace_id, after.attempt_count);
-
-      if (attempt.verdict === 'INDEPENDENT_DETERMINATION') {
-        if (!attempt.accepted || attempt.resulting_determination_id <= 0 || after.active_determination_id !== attempt.resulting_determination_id) {
-          throw new Error('Independent verdict did not produce the required active determination state.');
+    await runWrite(
+      'Propose determination',
+      () => proposeDeterminationTx(account, id, candidate),
+      async () => {
+        const after = await loadAgreement(id, true);
+        if (!after) throw new Error('Could not re-read the agreement after finalization.');
+        if (after.attempt_count !== before.attempt_count + 1) {
+          throw new Error('Finalized proposal did not create exactly one attempt.');
         }
-      } else if (attempt.verdict === 'SELF_JUDGING_AUTHORITY') {
-        if (attempt.accepted || attempt.resulting_determination_id !== 0 || after.self_judging_blocks !== before.self_judging_blocks + 1) {
-          throw new Error('Self-judging verdict did not produce the required blocked state.');
-        }
-      } else {
-        throw new Error(`Unexpected stored verdict: ${attempt.verdict}`);
-      }
+        const attempt = await getAttempt(id, after.attempt_count);
+        setLatestAttempt(attempt);
 
-      setCandidateInput('');
-      setWorkspace(after);
-      setLatestAttempt(attempt);
-      await loadWorkspace(after.workspace_id, true);
-      await loadConfig();
-      setTx({
-        phase: 'VERIFIED',
-        label: 'Propose determination',
-        hash,
-        execution: outcome.name,
-        message: `${verdictLabel(attempt.verdict)} verified in finalized state.`,
-      });
-      setNotice(`${verdictLabel(attempt.verdict)} · cache ${attempt.used_cache ? 'hit' : 'miss'}.`);
-    } catch (error) {
-      setTx((current) => ({
-        phase: 'ERROR',
-        label: 'Propose determination',
-        hash: current?.hash,
-        message: cleanError(error),
-      }));
-      setNotice(cleanError(error));
-    } finally {
-      setBusy(false);
-    }
+        if (attempt.verdict === 'INDEPENDENT_DETERMINATION') {
+          if (!after.pending_clause_text) {
+            throw new Error('An independent verdict did not leave a clause awaiting signature.');
+          }
+          if (after.active_determination_id !== before.active_determination_id) {
+            throw new Error('Consensus activated a determination without a countersignature.');
+          }
+        } else if (attempt.verdict === 'SELF_JUDGING_AUTHORITY') {
+          if (
+            attempt.accepted ||
+            attempt.resulting_determination_id !== 0 ||
+            after.self_judging_blocks !== before.self_judging_blocks + 1 ||
+            after.pending_clause_text !== ''
+          ) {
+            throw new Error('A self-judging verdict did not produce the required blocked state.');
+          }
+        } else {
+          throw new Error(`Unexpected stored verdict: ${attempt.verdict}`);
+        }
+
+        setCandidateInput('');
+        await loadConfig();
+        return `${verdictLabel(attempt.verdict)} · ${
+          attempt.used_cache ? 'cache hit' : 'fresh consensus'
+        } · ${
+          attempt.verdict === 'INDEPENDENT_DETERMINATION'
+            ? 'awaiting the other party’s signature'
+            : 'blocked, no clause stored'
+        }.`;
+      },
+    );
   }
 
-  const workspaceTitle = workspace ? `Workspace #${workspace.workspace_id}` : 'No workspace loaded';
+  async function handleCountersign() {
+    if (!account || !agreement) return;
+    const id = agreement.agreement_id;
+    const before = agreement;
+    await runWrite(
+      'Countersign clause',
+      () => countersignDeterminationTx(account, id),
+      async () => {
+        const after = await loadAgreement(id, true);
+        if (!after) throw new Error('Could not re-read the agreement after finalization.');
+        if (after.active_determination_id <= before.active_determination_id) {
+          throw new Error('The countersignature did not activate a determination.');
+        }
+        if (after.pending_clause_text !== '') {
+          throw new Error('The pending clause was not consumed.');
+        }
+        return `Determination #${after.active_determination_id} (v${after.active_version}) is in force. Escrow can now be released.`;
+      },
+    );
+  }
+
+  async function handleRelease() {
+    if (!account || !agreement) return;
+    const id = agreement.agreement_id;
+    await runWrite(
+      'Release escrow',
+      () => releaseEscrowTx(account, id),
+      async () => {
+        const after = await loadAgreement(id, true);
+        if (after?.status !== 'RELEASED' || after.escrow_wei !== '0') {
+          throw new Error('Finalized state does not show the escrow as released.');
+        }
+        return `Escrow paid to the responsible party. Agreement #${id} is RELEASED.`;
+      },
+    );
+  }
+
+  async function handleRefund() {
+    if (!account || !agreement) return;
+    const id = agreement.agreement_id;
+    await runWrite(
+      'Reclaim escrow',
+      () => refundEscrowTx(account, id),
+      async () => {
+        const after = await loadAgreement(id, true);
+        if (after?.status !== 'REFUNDED' || after.escrow_wei !== '0') {
+          throw new Error('Finalized state does not show the escrow as reclaimed.');
+        }
+        return `Escrow returned to the obligee. Agreement #${id} is REFUNDED.`;
+      },
+    );
+  }
+
+  const agreementTitle = agreement ? `Agreement #${agreement.agreement_id}` : 'No agreement loaded';
 
   return (
     <div className="app-shell">
@@ -441,9 +610,9 @@ export default function App() {
             <AddressChip value={CONTRACT_ADDRESS} href={CONTRACT_EXPLORER_URL} />
           </div>
           <div className="topbar-actions">
-            {workspace && (
-              <button className="workspace-pill" type="button" onClick={() => go('workspace')}>
-                <span>OPEN</span> Workspace #{workspace.workspace_id}
+            {agreement && (
+              <button className="workspace-pill" type="button" onClick={() => go('agreement')}>
+                <span>OPEN</span> Agreement #{agreement.agreement_id}
               </button>
             )}
             <button className="wallet-button" type="button" onClick={connect} disabled={busy}>
@@ -460,43 +629,48 @@ export default function App() {
             <>
               <section className="hero">
                 <div className="hero-copy">
-                  <span className="hero-kicker">ON-CHAIN META-RIGHT GUARD</span>
-                  <h1>No one should grade <em>their own</em> compliance.</h1>
+                  <span className="hero-kicker">ESCROW GATED BY A META-RIGHT</span>
+                  <h1>Money should not move through a contract someone <em>grades themselves</em>.</h1>
                   <p>
-                    AuthoritySplit separates the party that owes a duty from the authority that decides whether that duty was satisfied. The frozen SelfJudgingGuard contract asks one narrow semantic question; contract code applies the consequence.
+                    Two wallets sign one duty and lock real GEN behind it. Either may propose the clause
+                    that decides who judges compliance. GenLayer validators answer one narrow question
+                    about that clause, and the contract refuses to pay out until the answer is independent.
                   </p>
                   <div className="hero-actions">
-                    <button type="button" className="primary" onClick={() => go('create')}>Create workspace <span>→</span></button>
-                    <button type="button" className="secondary" onClick={() => go('workspace')}>Inspect state</button>
+                    <button type="button" className="primary" onClick={() => go('create')}>Create agreement <span>→</span></button>
+                    <button type="button" className="secondary" onClick={() => go('agreement')}>Inspect state</button>
                   </div>
                 </div>
                 <div className="authority-diagram" aria-label="Authority separation diagram">
                   <div className="diagram-top">
                     <span>RESPONSIBLE PARTY</span>
-                    <strong>Duty holder</strong>
+                    <strong>Duty holder · escrow payee</strong>
                   </div>
                   <div className="diagram-axis"><i /><b>FINAL DETERMINATION</b><i /></div>
                   <div className="diagram-choices">
-                    <div className="choice blocked"><span>BLOCKED</span><strong>Unilateral control</strong><small>SELF_JUDGING_AUTHORITY</small></div>
-                    <div className="choice good"><span>ACCEPTED</span><strong>Independent authority</strong><small>INDEPENDENT_DETERMINATION</small></div>
+                    <div className="choice blocked"><span>ESCROW FROZEN</span><strong>Unilateral control</strong><small>SELF_JUDGING_AUTHORITY</small></div>
+                    <div className="choice good"><span>ESCROW RELEASABLE</span><strong>Independent authority</strong><small>INDEPENDENT_DETERMINATION</small></div>
                   </div>
                 </div>
               </section>
 
               <section className="stats-band">
-                <Metric label="Workspaces" value={config?.workspace_count ?? '—'} note="finalized state" />
-                <Metric label="Determinations" value={config?.determination_count ?? '—'} note="accepted versions" />
-                <Metric label="Semantic budget" value={config ? `${config.max_semantic_evals_per_workspace} / workspace` : '—'} note="fresh classifications" />
+                <Metric label="Agreements" value={config?.agreement_count ?? '—'} note="finalized state" />
+                <Metric label="Determinations" value={config?.determination_count ?? '—'} note="countersigned versions" />
+                <Metric label="Semantic budget" value={config ? `${config.max_semantic_evals_per_agreement} / agreement` : '—'} note="fresh classifications" />
                 <Metric label="Contract version" value={config?.version ?? '—'} note={sourceParityOk ? 'expected profile' : 'verify live'} />
               </section>
 
               <section className="overview-grid">
                 <article className="panel rule-panel">
-                  <SectionHead eyebrow="THE RULE" title="Semantic scope stays narrow." />
+                  <SectionHead eyebrow="THE FLOW" title="Six writes, one gate." />
                   <div className="rule-lines">
-                    <div><span>01</span><p>Record an immutable duty and the party responsible for it.</p></div>
-                    <div><span>02</span><p>Classify only who controls the final compliance determination.</p></div>
-                    <div><span>03</span><p>Block self-judging authority; version independent determinations.</p></div>
+                    <div><span>01</span><p>The obligee escrows GEN and names a different wallet as responsible party.</p></div>
+                    <div><span>02</span><p>That wallet accepts the duty. Two signatures, one immutable duty text.</p></div>
+                    <div><span>03</span><p>Either party proposes the clause that decides who judges compliance.</p></div>
+                    <div><span>04</span><p>Validators classify only that clause. Self-judging is blocked permanently.</p></div>
+                    <div><span>05</span><p>The other party countersigns. Consensus alone activates nothing.</p></div>
+                    <div><span>06</span><p>Escrow releases only while an independent determination is in force.</p></div>
                   </div>
                 </article>
                 <article className="panel boundary-panel">
@@ -506,6 +680,14 @@ export default function App() {
                     <span>Whether a duty is fair</span>
                     <span>Damages or remedies</span>
                     <span>External facts not in the clause</span>
+                    <span>Who wins a dispute</span>
+                  </div>
+                  <div className="guard-note">
+                    <span>MUTUAL CONSENT IS NOT A BYPASS</span>
+                    <p>
+                      A blocked clause cannot be countersigned into force. The responsible party cannot
+                      obtain the right to judge itself by persuading its counterparty to sign.
+                    </p>
                   </div>
                 </article>
               </section>
@@ -516,103 +698,234 @@ export default function App() {
             <section className="two-col-page">
               <div>
                 <SectionHead
-                  eyebrow="CREATE WORKSPACE"
-                  title="Freeze the duty before testing the decision authority."
-                  body="The caller becomes the immutable workspace authority. Forms intentionally start empty; the app never preloads runtime evidence into a transaction form."
+                  eyebrow="CREATE AGREEMENT"
+                  title="Lock the escrow before testing the decision authority."
+                  body="The caller becomes the obligee and funds the escrow. The responsible party is an address, not a label, and it must be a different wallet. Forms start empty by design."
                 />
                 <div className="guard-note">
                   <span>IMMUTABLE CONTEXT</span>
-                  <p>The responsible-party label and duty become the semantic context for every later determination proposal in this workspace.</p>
+                  <p>The duty text is frozen at creation and becomes the semantic context for every later determination clause in this agreement.</p>
+                </div>
+                <div className="semantic-boundary">
+                  <span>REFUND WINDOW</span>
+                  <p>
+                    If no independent determination is ever established, the obligee may reclaim the
+                    escrow after this window elapses. Once a determination is in force, the refund path
+                    closes and only release remains.
+                  </p>
                 </div>
               </div>
               <form className="panel form-panel" onSubmit={handleCreate}>
                 <label>
-                  <span>Responsible party label</span>
+                  <span>Responsible party address</span>
                   <input
-                    value={labelInput}
-                    onChange={(e) => setLabelInput(e.target.value)}
-                    placeholder="e.g. Service Provider"
-                    maxLength={200}
+                    value={partyInput}
+                    onChange={(e) => setPartyInput(e.target.value.trim())}
+                    placeholder="e.g. 0x1234…abcd (a different wallet)"
+                    maxLength={42}
                     disabled={busy}
                   />
-                  <small>{labelInput.length} / 200</small>
+                  <small>{/^0x[0-9a-fA-F]{40}$/.test(partyInput) ? 'Valid address' : '20-byte 0x address required'}</small>
                 </label>
                 <label>
                   <span>Immutable duty</span>
                   <textarea
                     value={dutyInput}
                     onChange={(e) => setDutyInput(e.target.value)}
-                    placeholder="Describe the duty whose compliance determination must remain independent."
+                    placeholder="e.g. The vendor must restore critical incidents within four hours of a reported outage."
                     maxLength={4000}
-                    rows={9}
+                    rows={7}
                     disabled={busy}
                   />
                   <small>{dutyInput.length} / 4000</small>
                 </label>
+                <label>
+                  <span>Escrow amount (GEN)</span>
+                  <input
+                    value={escrowInput}
+                    onChange={(e) => setEscrowInput(e.target.value)}
+                    placeholder="e.g. 0.01"
+                    inputMode="decimal"
+                    disabled={busy}
+                  />
+                  <small>Sent with the transaction and held by the contract.</small>
+                </label>
+                <label>
+                  <span>Refund window</span>
+                  <select
+                    value={windowInput}
+                    onChange={(e) => setWindowInput(e.target.value)}
+                    disabled={busy}
+                  >
+                    {WINDOW_CHOICES.map((choice) => (
+                      <option key={choice.seconds} value={choice.seconds}>{choice.label}</option>
+                    ))}
+                  </select>
+                  <small>Measured from the consensus clock, not the browser clock.</small>
+                </label>
                 <div className="form-footer">
-                  <div><span>Authority wallet</span><strong>{account ? short(account, 9, 7) : 'Connect wallet first'}</strong></div>
-                  <button className="primary" type="submit" disabled={busy || !account}>Create workspace →</button>
+                  <div><span>Obligee wallet</span><strong>{account ? short(account, 9, 7) : 'Connect wallet first'}</strong></div>
+                  <button className="primary" type="submit" disabled={busy || !account}>Fund and create →</button>
                 </div>
               </form>
             </section>
           )}
 
-          {page === 'workspace' && (
+          {page === 'agreement' && (
             <>
               <section className="workspace-hero">
                 <div>
-                  <SectionHead eyebrow="FINALIZED STATE" title={workspaceTitle} body="Open any workspace ID. Reads are requested from finalized contract state." />
+                  <SectionHead eyebrow="FINALIZED STATE" title={agreementTitle} body="Open any agreement ID. Every read is requested from finalized contract state." />
                 </div>
                 <form
                   className="workspace-loader"
                   onSubmit={(event) => {
                     event.preventDefault();
-                    void loadWorkspace(Number(workspaceIdInput));
+                    void loadAgreement(Number(agreementIdInput));
                   }}
                 >
                   <input
                     inputMode="numeric"
-                    value={workspaceIdInput}
-                    onChange={(e) => setWorkspaceIdInput(e.target.value.replace(/[^0-9]/g, ''))}
-                    placeholder="Workspace ID"
+                    value={agreementIdInput}
+                    onChange={(e) => setAgreementIdInput(e.target.value.replace(/[^0-9]/g, ''))}
+                    placeholder="Agreement ID"
                   />
                   <button type="submit" className="secondary">Open</button>
                 </form>
               </section>
 
-              {workspace ? (
+              {agreement ? (
                 <>
                   <section className="workspace-grid">
                     <article className="panel duty-card">
-                      <div className="card-meta"><span>DUTY HOLDER</span><AddressChip value={workspace.authority} /></div>
-                      <h3>{workspace.responsible_party_label}</h3>
-                      <blockquote>{workspace.duty_text}</blockquote>
+                      <div className="card-meta">
+                        <span>DUTY</span>
+                        <b className={statusClass(agreement.status)}>{agreement.status}</b>
+                      </div>
+                      <blockquote>{agreement.duty_text}</blockquote>
                       <div className="authority-line">
-                        <span>Workspace authority</span>
-                        <strong>{sameAddress(account, workspace.authority) ? 'Connected wallet · authority' : short(workspace.authority, 9, 7)}</strong>
+                        <span>Obligee · pays</span>
+                        <strong>{isObligee ? 'Connected wallet' : short(agreement.obligee, 9, 7)}</strong>
+                      </div>
+                      <div className="authority-line">
+                        <span>Responsible party · owes the duty</span>
+                        <strong>{isResponsible ? 'Connected wallet' : short(agreement.responsible_party, 9, 7)}</strong>
+                      </div>
+                      <div className="authority-line">
+                        <span>Escrow held</span>
+                        <strong>{weiToGen(agreement.escrow_wei)} GEN {escrowLocked ? '· locked' : ''}</strong>
+                      </div>
+                      <div className="authority-line">
+                        <span>Refund window ends</span>
+                        <strong>{deadlineText(agreement.refund_deadline_unix)}</strong>
                       </div>
                     </article>
 
                     <article className="panel determination-card">
-                      <div className="card-meta"><span>ACTIVE DETERMINATION</span><b>v{workspace.active_version}</b></div>
-                      {workspace.active_determination_id > 0 ? (
+                      <div className="card-meta"><span>ACTIVE DETERMINATION</span><b>v{agreement.active_version}</b></div>
+                      {determinationInForce ? (
                         <>
-                          <span className="verdict good">INDEPENDENT</span>
-                          <h3>Determination #{workspace.active_determination_id}</h3>
-                          <blockquote>{workspace.active_determination_text}</blockquote>
-                          {activeDetermination && <small>Accepted from attempt #{activeDetermination.from_attempt}</small>}
+                          <span className="verdict good">INDEPENDENT · IN FORCE</span>
+                          <h3>Determination #{agreement.active_determination_id}</h3>
+                          <blockquote>{agreement.active_determination_text}</blockquote>
+                          <small>
+                            Proposed by {short(agreement.active_proposed_by, 8, 6)}, countersigned by{' '}
+                            {short(agreement.active_countersigned_by, 8, 6)}
+                            {activeDetermination ? ` · from attempt #${activeDetermination.from_attempt}` : ''}
+                          </small>
+                        </>
+                      ) : hasPending ? (
+                        <>
+                          <span className="verdict neutral">AWAITING SIGNATURE</span>
+                          <h3>Clause passed consensus</h3>
+                          <blockquote>{agreement.pending_clause_text}</blockquote>
+                          <small>Proposed by {short(agreement.pending_proposed_by, 8, 6)} · the other party must countersign.</small>
                         </>
                       ) : (
-                        <div className="empty-card"><span>∅</span><strong>No active determination</strong><p>An independent clause has not been accepted yet.</p></div>
+                        <div className="empty-card">
+                          <span>∅</span>
+                          <strong>No determination in force</strong>
+                          <p>Escrow cannot be released until an independent clause is countersigned.</p>
+                        </div>
                       )}
                     </article>
                   </section>
 
                   <section className="counter-grid">
-                    <Metric label="Attempts" value={workspace.attempt_count} note={`cap ${config?.max_attempts_per_workspace ?? 100}`} />
-                    <Metric label="Fresh semantic evals" value={workspace.semantic_eval_count} note={`${semanticBudgetRemaining} remaining`} />
-                    <Metric label="Blocked self-judging" value={workspace.self_judging_blocks} note="deterministic consequence" />
-                    <Metric label="Accepted versions" value={workspace.version_count} note={`cap ${config?.max_determination_versions ?? 20}`} />
+                    <Metric label="Attempts" value={agreement.attempt_count} note={`cap ${config?.max_attempts_per_agreement ?? 100}`} />
+                    <Metric label="Fresh semantic evals" value={agreement.semantic_eval_count} note={`${semanticBudgetRemaining} remaining`} />
+                    <Metric label="Blocked self-judging" value={agreement.self_judging_blocks} note="deterministic consequence" />
+                    <Metric label="Countersigned versions" value={agreement.version_count} note={`cap ${config?.max_determination_versions ?? 20}`} />
+                  </section>
+
+                  <section className="panel escrow-actions">
+                    <SectionHead
+                      eyebrow="CONSEQUENCE"
+                      title="What this wallet may do right now"
+                      body="Every button below is gated by the contract, not by the interface. A disabled button explains a rule; a refused transaction proves it."
+                    />
+                    <div className="action-row">
+                      <div>
+                        <strong>Accept the duty</strong>
+                        <p>Responsible party only. Binds the second signature and activates the agreement.</p>
+                      </div>
+                      <button
+                        type="button"
+                        className="primary"
+                        disabled={busy || !account || !isResponsible || agreement.status !== 'AWAITING_ACCEPTANCE'}
+                        onClick={() => void handleAccept()}
+                      >
+                        Accept duty
+                      </button>
+                    </div>
+                    <div className="action-row">
+                      <div>
+                        <strong>Countersign the pending clause</strong>
+                        <p>The party that did not propose it. Consensus alone never puts a clause in force.</p>
+                      </div>
+                      <button
+                        type="button"
+                        className="primary"
+                        disabled={busy || !account || !isParty || !hasPending || pendingIsMine || !isActive}
+                        onClick={() => void handleCountersign()}
+                      >
+                        Countersign
+                      </button>
+                    </div>
+                    <div className="action-row">
+                      <div>
+                        <strong>Release escrow to the responsible party</strong>
+                        <p>
+                          Obligee only, and only while an independent determination is in force.
+                          {determinationInForce ? '' : ' No determination is in force, so this is refused.'}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        className="primary"
+                        disabled={busy || !account || !isObligee || !isActive || !determinationInForce}
+                        onClick={() => void handleRelease()}
+                      >
+                        Release {weiToGen(agreement.escrow_wei)} GEN
+                      </button>
+                    </div>
+                    <div className="action-row">
+                      <div>
+                        <strong>Reclaim escrow</strong>
+                        <p>
+                          Obligee only, after the refund window, and only while no determination is in
+                          force.{refundDue ? '' : ' The window has not elapsed yet.'}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        className="secondary"
+                        disabled={busy || !account || !isObligee || !escrowLocked || determinationInForce || !refundDue}
+                        onClick={() => void handleRefund()}
+                      >
+                        Reclaim
+                      </button>
+                    </div>
                   </section>
 
                   <section className="workspace-actions">
@@ -621,7 +934,11 @@ export default function App() {
                   </section>
                 </>
               ) : (
-                <div className="empty-state-large"><span>WORKSPACE</span><h3>Open a finalized workspace to inspect its authority boundary.</h3><p>No local browser state is used as evidence.</p></div>
+                <div className="empty-state-large">
+                  <span>AGREEMENT</span>
+                  <h3>Open a finalized agreement to inspect its authority boundary and escrow.</h3>
+                  <p>No local browser state is ever used as evidence.</p>
+                </div>
               )}
             </>
           )}
@@ -629,16 +946,26 @@ export default function App() {
           {page === 'propose' && (
             <section className="two-col-page propose-page">
               <div>
-                <SectionHead eyebrow="PROPOSE DETERMINATION" title="Who controls the final answer?" body="The semantic call does not decide whether the duty was actually met. It only classifies unilateral decisive control over the final compliance determination." />
-                {workspace ? (
+                <SectionHead
+                  eyebrow="PROPOSE DETERMINATION"
+                  title="Who controls the final answer?"
+                  body="The semantic call does not decide whether the duty was met. It classifies one thing: unilateral decisive control over the final compliance determination."
+                />
+                {agreement ? (
                   <div className="context-card">
-                    <div><span>Workspace</span><strong>#{workspace.workspace_id}</strong></div>
-                    <div><span>Responsible party</span><strong>{workspace.responsible_party_label}</strong></div>
+                    <div><span>Agreement</span><strong>#{agreement.agreement_id}</strong></div>
+                    <div><span>Status</span><strong>{agreement.status}</strong></div>
+                    <div><span>Escrow at stake</span><strong>{weiToGen(agreement.escrow_wei)} GEN</strong></div>
                     <div><span>Fresh semantic budget</span><strong>{semanticBudgetRemaining} remaining</strong></div>
-                    <div><span>Connected role</span><strong className={isAuthority ? 'role-ok' : 'role-bad'}>{isAuthority ? 'Workspace authority' : 'Read only'}</strong></div>
+                    <div>
+                      <span>Connected role</span>
+                      <strong className={isParty ? 'role-ok' : 'role-bad'}>
+                        {isObligee ? 'Obligee' : isResponsible ? 'Responsible party' : 'Read only'}
+                      </strong>
+                    </div>
                   </div>
                 ) : (
-                  <button className="secondary wide" type="button" onClick={() => go('workspace')}>Load a workspace first</button>
+                  <button className="secondary wide" type="button" onClick={() => go('agreement')}>Load an agreement first</button>
                 )}
                 <div className="semantic-boundary">
                   <span>SEMANTIC QUESTION</span>
@@ -648,24 +975,37 @@ export default function App() {
 
               <form className="panel form-panel proposal-form" onSubmit={handlePropose}>
                 <label>
-                  <span>Workspace ID</span>
-                  <input value={workspace?.workspace_id ?? ''} readOnly placeholder="Load a workspace" />
+                  <span>Agreement ID</span>
+                  <input value={agreement?.agreement_id ?? ''} readOnly placeholder="Load an agreement" />
                 </label>
                 <label>
                   <span>Candidate determination clause</span>
                   <textarea
                     value={candidateInput}
                     onChange={(e) => setCandidateInput(e.target.value)}
-                    placeholder="Write the proposed final determination authority."
+                    placeholder="e.g. Restoration completion is determined by a third-party monitoring service jointly selected by both parties."
                     maxLength={4000}
                     rows={11}
-                    disabled={busy || !workspace}
+                    disabled={busy || !agreement}
                   />
                   <small>{candidateInput.length} / 4000</small>
                 </label>
                 <div className="form-footer stacked-mobile">
-                  <div><span>Write permission</span><strong>{workspace ? (isAuthority ? 'Authorized' : 'Authority wallet required') : 'Load workspace'}</strong></div>
-                  <button className="primary" type="submit" disabled={busy || !workspace || !account || !isAuthority}>Run determination →</button>
+                  <div>
+                    <span>Write permission</span>
+                    <strong>
+                      {!agreement
+                        ? 'Load agreement'
+                        : !isParty
+                          ? 'A party wallet is required'
+                          : !isActive
+                            ? 'Agreement must be ACTIVE'
+                            : 'Authorized'}
+                    </strong>
+                  </div>
+                  <button className="primary" type="submit" disabled={busy || !agreement || !account || !isParty || !isActive}>
+                    Run determination →
+                  </button>
                 </div>
               </form>
 
@@ -677,9 +1017,9 @@ export default function App() {
                     <strong>Attempt #{latestAttempt.attempt_id}</strong>
                   </div>
                   <div className="result-grid">
-                    <div><span>Consequence</span><strong>{latestAttempt.accepted ? 'Accepted + versioned' : 'Blocked'}</strong></div>
+                    <div><span>Consequence</span><strong>{latestAttempt.accepted ? 'Awaiting countersignature' : 'Blocked'}</strong></div>
                     <div><span>Semantic source</span><strong>{latestAttempt.used_cache ? 'Cache hit' : 'Fresh consensus'}</strong></div>
-                    <div><span>Determination ID</span><strong>{latestAttempt.resulting_determination_id || '—'}</strong></div>
+                    <div><span>Escrow</span><strong>{determinationInForce ? 'Releasable' : 'Frozen'}</strong></div>
                   </div>
                 </article>
               )}
@@ -689,28 +1029,44 @@ export default function App() {
           {page === 'audit' && (
             <>
               <section className="workspace-hero">
-                <div><SectionHead eyebrow="ATTEMPT LOG" title={workspace ? `Workspace #${workspace.workspace_id} audit trail` : 'Load a workspace'} body="The log shows stored consequential verdicts and whether the semantic cache was reused." /></div>
-                {!workspace && <button type="button" className="secondary" onClick={() => go('workspace')}>Open workspace</button>}
+                <div>
+                  <SectionHead
+                    eyebrow="ATTEMPT LOG"
+                    title={agreement ? `Agreement #${agreement.agreement_id} audit trail` : 'Load an agreement'}
+                    body="Stored verdicts, the consequence each produced, and whether the per-agreement semantic cache was reused."
+                  />
+                </div>
+                {!agreement && <button type="button" className="secondary" onClick={() => go('agreement')}>Open agreement</button>}
               </section>
 
-              {workspace && (
+              {agreement && (
                 <section className="audit-layout">
                   <div className="audit-summary panel">
-                    <Metric label="Attempts" value={workspace.attempt_count} />
-                    <Metric label="Fresh evals" value={workspace.semantic_eval_count} />
-                    <Metric label="Cache reuses" value={Math.max(0, workspace.attempt_count - workspace.semantic_eval_count)} />
-                    <Metric label="Blocked" value={workspace.self_judging_blocks} />
+                    <Metric label="Attempts" value={agreement.attempt_count} />
+                    <Metric label="Fresh evals" value={agreement.semantic_eval_count} />
+                    <Metric label="Cache reuses" value={Math.max(0, agreement.attempt_count - agreement.semantic_eval_count)} />
+                    <Metric label="Blocked" value={agreement.self_judging_blocks} />
                   </div>
                   <div className="attempt-table panel">
                     <div className="table-head"><span>ID</span><span>Verdict</span><span>Consequence</span><span>Semantic</span></div>
                     {attempts.length ? attempts.map((attempt) => (
                       <div className="table-row" key={attempt.attempt_id}>
                         <strong>#{attempt.attempt_id}</strong>
-                        <span className={verdictClass(attempt.verdict)}>{attempt.verdict === 'INDEPENDENT_DETERMINATION' ? 'INDEPENDENT' : 'SELF-JUDGING'}</span>
-                        <span>{attempt.accepted ? `Determination #${attempt.resulting_determination_id}` : 'Blocked'}</span>
-                        <span className={attempt.used_cache ? 'cache-hit' : 'cache-fresh'}>{attempt.used_cache ? 'CACHE HIT' : 'FRESH'}</span>
+                        <span className={verdictClass(attempt.verdict)}>
+                          {attempt.verdict === 'INDEPENDENT_DETERMINATION' ? 'INDEPENDENT' : 'SELF-JUDGING'}
+                        </span>
+                        <span>
+                          {attempt.resulting_determination_id
+                            ? `Determination #${attempt.resulting_determination_id}`
+                            : attempt.accepted
+                              ? 'Passed to signature'
+                              : 'Blocked'}
+                        </span>
+                        <span className={attempt.used_cache ? 'cache-hit' : 'cache-fresh'}>
+                          {attempt.used_cache ? 'CACHE HIT' : 'FRESH'}
+                        </span>
                       </div>
-                    )) : <div className="table-empty">No attempts recorded in this workspace.</div>}
+                    )) : <div className="table-empty">No attempts recorded in this agreement.</div>}
                   </div>
                 </section>
               )}
@@ -720,38 +1076,55 @@ export default function App() {
           {page === 'verification' && (
             <>
               <section className="verification-hero">
-                <SectionHead eyebrow="VERIFICATION" title="Frozen contract. Separate runtime evidence. Clean project address." body="The project contract is a fresh deployment of the frozen source. Runtime evidence was produced on a separate address so application state can start clean." />
+                <SectionHead
+                  eyebrow="VERIFICATION"
+                  title="One address. One source hash. Every claim re-runnable."
+                  body="The frontend targets the same contract source the Direct Mode suite and the mutation matrix run against. The hash below is checked by npm run verify."
+                />
               </section>
 
               <section className="verification-grid">
                 <article className="panel verify-card">
                   <span>PROJECT ADDRESS</span>
                   <h3>{short(CONTRACT_ADDRESS, 12, 10)}</h3>
-                  <p>Frontend target. Intended to remain clean until project users create workspaces.</p>
-                  <a href={CONTRACT_EXPLORER_URL} target="_blank" rel="noreferrer">Open project contract ↗</a>
+                  <p>The deployed AuthoritySplit this interface reads and writes.</p>
+                  <a href={CONTRACT_EXPLORER_URL} target="_blank" rel="noreferrer">Open on the explorer ↗</a>
                 </article>
                 <article className="panel verify-card">
-                  <span>RUNTIME EVIDENCE</span>
-                  <h3>{short(RUNTIME_EVIDENCE_ADDRESS, 12, 10)}</h3>
-                  <p>Separate StudioNet deployment used for the load-bearing runtime checks.</p>
-                  <a href={RUNTIME_EXPLORER_URL} target="_blank" rel="noreferrer">Open runtime contract ↗</a>
+                  <span>LIVE PROFILE</span>
+                  <h3>{config ? `${config.name} v${config.version}` : 'Reading…'}</h3>
+                  <p>
+                    {sourceParityOk
+                      ? `Semantic budget ${config?.max_semantic_evals_per_agreement} per agreement, no global admin.`
+                      : 'The live contract profile has not matched the expected source profile yet.'}
+                  </p>
                 </article>
               </section>
 
               <section className="panel source-card">
                 <div>
-                  <span className="eyebrow">FROZEN SOURCE SHA256</span>
+                  <span className="eyebrow">CONTRACT SOURCE SHA256</span>
                   <code>{SOURCE_SHA256}</code>
                 </div>
                 <button type="button" className="secondary" onClick={() => void copyText(SOURCE_SHA256)}>Copy hash</button>
               </section>
 
               <section className="proof-list">
-                <div><span>01</span><strong>Self-judging consequence</strong><p>Semantic verdict stored as SELF_JUDGING_AUTHORITY; contract blocked the proposal and created no determination.</p><b>PASS</b></div>
-                <div><span>02</span><strong>Independent consequence</strong><p>INDEPENDENT_DETERMINATION created and activated a new determination version.</p><b>PASS</b></div>
-                <div><span>03</span><strong>Same-workspace reroll prevention</strong><p>Retry reused the cached verdict and did not consume an additional semantic evaluation.</p><b>PASS</b></div>
-                <div><span>04</span><strong>Cross-workspace isolation</strong><p>The same clause in another workspace performed a fresh classification instead of inheriting another workspace's cache.</p><b>PASS</b></div>
-                <div><span>05</span><strong>Authority boundary</strong><p>A non-authority proposal produced contract rollback and left finalized workspace state unchanged.</p><b>PASS</b></div>
+                <div><span>01</span><strong>Self-judging consequence</strong><p>A clause giving the responsible party sole discretion stores SELF_JUDGING_AUTHORITY, increments the block counter, and leaves nothing pending.</p><b>TESTED</b></div>
+                <div><span>02</span><strong>Consensus does not activate</strong><p>An INDEPENDENT_DETERMINATION verdict only queues the clause for signature. The active determination is unchanged until the other party countersigns.</p><b>TESTED</b></div>
+                <div><span>03</span><strong>Escrow is gated by the verdict</strong><p>release_escrow is refused while no independent determination is in force, and refund_escrow is refused once one is.</p><b>TESTED</b></div>
+                <div><span>04</span><strong>Mutual consent is not a bypass</strong><p>A blocked clause cannot be countersigned into force by agreement between the two parties.</p><b>TESTED</b></div>
+                <div><span>05</span><strong>Reroll prevention and isolation</strong><p>An exact resubmission reuses the cached verdict without spending budget; the same clause in another agreement is classified fresh.</p><b>TESTED</b></div>
+                <div><span>06</span><strong>Prompt fence</strong><p>A clause that forges the CANDIDATE_CLAUSE boundary is neutralised before the model sees it, proven by detector mocks that fire only on a leak.</p><b>TESTED</b></div>
+              </section>
+
+              <section className="guard-note">
+                <span>HOW TO RE-RUN</span>
+                <p>
+                  <code>pytest tests/direct</code> executes 28 checks on a pinned GenVM build.
+                  <code>python3 scripts/mutation_matrix.py</code> breaks the contract twenty ways and
+                  requires the suite to fail on every one. See TESTING.md.
+                </p>
               </section>
             </>
           )}
@@ -759,7 +1132,7 @@ export default function App() {
 
         <footer>
           <div><img className="brand-logo small" src="/logo.svg" alt="" aria-hidden="true" /><strong>AuthoritySplit</strong></div>
-          <p>Semantic classification is narrow. Consequences are deterministic.</p>
+          <p>Semantic classification is narrow. Consequences are deterministic. Escrow is real.</p>
           <a href={CONTRACT_EXPLORER_URL} target="_blank" rel="noreferrer">StudioNet ↗</a>
         </footer>
       </main>

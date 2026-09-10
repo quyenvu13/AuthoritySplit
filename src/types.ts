@@ -4,23 +4,40 @@ export type GuardConfig = {
   name: string;
   version: string;
   semantic_verdicts: string[];
-  clock_used: boolean;
-  global_admin: boolean;
-  max_determination_versions: number;
-  max_attempts_per_workspace: number;
-  max_semantic_evals_per_workspace: number;
-  workspace_count: number;
+  agreement_count: number;
   determination_count: number;
+  max_text_length: number;
+  max_determination_versions: number;
+  max_attempts_per_agreement: number;
+  max_semantic_evals_per_agreement: number;
+  min_refund_window: number;
+  max_refund_window: number;
+  global_admin: string | null;
 };
 
-export type Workspace = {
-  workspace_id: number;
-  authority: Address;
-  responsible_party_label: string;
+export type AgreementStatus =
+  | 'AWAITING_ACCEPTANCE'
+  | 'ACTIVE'
+  | 'RELEASED'
+  | 'REFUNDED';
+
+export type Agreement = {
+  agreement_id: number;
+  obligee: Address;
+  responsible_party: Address;
   duty_text: string;
+  status: AgreementStatus | string;
+  accepted: boolean;
+  /** wei, as a decimal string — never a JS number */
+  escrow_wei: string;
+  refund_deadline_unix: number;
   active_determination_id: number;
   active_version: number;
   active_determination_text: string;
+  active_proposed_by: string;
+  active_countersigned_by: string;
+  pending_clause_text: string;
+  pending_proposed_by: string;
   version_count: number;
   attempt_count: number;
   semantic_eval_count: number;
@@ -28,7 +45,7 @@ export type Workspace = {
 };
 
 export type Attempt = {
-  workspace_id?: number;
+  agreement_id?: number;
   attempt_id: number;
   proposer?: Address;
   candidate_clause?: string;
@@ -40,12 +57,13 @@ export type Attempt = {
 
 export type Determination = {
   determination_id: number;
-  workspace_id: number;
+  agreement_id: number;
   version_number: number;
   text: string;
   verdict: string;
+  proposed_by: Address;
+  countersigned_by: Address;
   from_attempt: number;
-  is_active: boolean;
 };
 
 export type TxPhase = 'IDLE' | 'SUBMITTED' | 'FINALIZED' | 'VERIFIED' | 'ERROR';

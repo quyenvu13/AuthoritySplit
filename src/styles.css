@@ -232,3 +232,24 @@ footer > div { display: flex; align-items: center; gap: 9px; color: var(--ink); 
   .result-grid, .context-card { grid-template-columns: 1fr; }.context-card div:nth-child(odd) { border-right: 0; }.context-card div { border-bottom: 1px solid var(--line) !important; }.context-card div:last-child { border-bottom: 0 !important; }
   footer { margin: 0 16px; grid-template-columns: 1fr auto; } footer p { display: none; }
 }
+
+/* ---------- agreement escrow actions (v2 flow) ---------- */
+.form-panel select { width: 100%; min-height: 48px; padding: 0 11px; border: 1px solid #d8d4c8; background: #fffef9; color: var(--ink); border-radius: 13px; outline: none; appearance: none; background-image: linear-gradient(45deg, transparent 50%, #9a9d96 50%), linear-gradient(135deg, #9a9d96 50%, transparent 50%); background-position: calc(100% - 19px) 21px, calc(100% - 14px) 21px; background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; }
+.form-panel select:focus { border-color: #9ca9ff; box-shadow: 0 0 0 3px #e8ebff; }
+
+.escrow-actions { margin-top: 22px; padding: 24px; }
+.escrow-actions .section-head { margin-bottom: 4px; }
+.action-row { display: grid; grid-template-columns: 1fr auto; gap: 18px; align-items: center; padding: 15px 0; border-top: 1px solid var(--line); }
+.action-row strong { display: block; font-size: 12px; }
+.action-row p { margin: 5px 0 0; color: var(--muted); font-size: 11px; line-height: 1.6; max-width: 62ch; }
+.action-row button { white-space: nowrap; }
+.action-row button:disabled { opacity: .42; cursor: not-allowed; }
+
+.guard-note code { font: 700 10px ui-monospace, monospace; background: #f2f0e9; border-radius: 5px; padding: 1px 5px; margin-right: 5px; }
+.duty-card .authority-line + .authority-line { border-top: 1px solid var(--line); }
+.determination-card small { display: block; margin-top: 9px; color: var(--muted); font-size: 10px; line-height: 1.6; }
+
+@media (max-width: 720px) {
+  .action-row { grid-template-columns: 1fr; align-items: start; }
+  .action-row button { width: 100%; }
+}
