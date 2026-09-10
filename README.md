@@ -79,7 +79,7 @@ resistance; validator reruns provide the convergence discipline.
 | Source SHA-256 | `d1ff73c8a650f8932a50046fb03c17aa0acedf9d40890091002d47bea4a860f6` |
 | Contract version | `2.0` (`get_config().version`) |
 | Network | GenLayer StudioNet (chain `61999`) |
-| Address | set in `src/config.ts` after deployment |
+| Address | [`0x7906B2F82C7c217f9321789CB53fb293a02e3B38`](https://explorer-studio.genlayer.com/address/0x7906B2F82C7c217f9321789CB53fb293a02e3B38) |
 
 `npm run verify` recomputes the contract hash and fails if `src/config.ts`, the
 contract version, the semantic budget, or `FINAL_CHECKSUMS.txt` disagree with it.
