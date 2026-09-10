@@ -84,6 +84,22 @@ resistance; validator reruns provide the convergence discipline.
 `npm run verify` recomputes the contract hash and fails if `src/config.ts`, the
 contract version, the semantic budget, or `FINAL_CHECKSUMS.txt` disagree with it.
 
+## The primitive, in two transactions
+
+Both were sent by the **same wallet**, calling the **same method**, on the **same
+agreement**. The only difference is the semantic verdict standing at the time.
+
+| | Transaction | Result |
+|---|---|---|
+| No independent determination in force | [`0x2da577ba…e1386719`](https://explorer-studio.genlayer.com/tx/0x2da577ba8af641989bd743984573efd78cf3e55ee6890651686cd12ae1386719) | **refused** — *No independent determination clause is in force*, escrow untouched |
+| After an independent clause was countersigned | [`0x07d6c590…4f3aa391`](https://explorer-studio.genlayer.com/tx/0x07d6c590cbb9b6098d7130a5f76e48d59344f599ab0f0fad17a2bc084f3aa391) | **0.01 GEN paid**, status `RELEASED` |
+
+A clause giving the vendor sole discretion was classified `SELF_JUDGING_AUTHORITY`
+and froze the escrow; a clause naming a jointly-selected third party was classified
+`INDEPENDENT_DETERMINATION` and, once countersigned, released it. Thirteen
+transactions across two money paths and three wallets — including every refusal —
+are listed with their hashes in `TESTING.md` §D.
+
 ## Verification
 
 ```bash

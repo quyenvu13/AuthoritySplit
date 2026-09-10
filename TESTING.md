@@ -173,24 +173,62 @@ primitive lives:
 - the terminal status (`RELEASED` / `REFUNDED`);
 - state written *before* the transfer is emitted, in both paths.
 
-The transfer is evidenced on chain. Record, for each of the two money paths:
+The transfer is evidenced on chain instead. Both money paths were executed on
+StudioNet against the deployed contract
+[`0x7906B2F82C7c217f9321789CB53fb293a02e3B38`](https://explorer-studio.genlayer.com/address/0x7906B2F82C7c217f9321789CB53fb293a02e3B38)
+from three independent MetaMask wallets:
 
-1. the `create_agreement` transaction, with the escrow value visible;
-2. the contract's balance after it;
-3. the `release_escrow` (or `refund_escrow`) transaction;
-4. the recipient's balance change and the contract's balance returning to zero.
+| Role | Address |
+|---|---|
+| **A** — obligee | `0x923a09d0D6e5C242e36C3c1D2071835917cC0bDF` |
+| **B** — responsible party | `0x188f15bC55302ff2d55f0107300499aed23a831E` |
+| **C** — outsider, party to nothing | `0x3b097922A159B8D81197F0b0d19ef3f29D2B3c8b` |
 
-Fill in the table below with the real hashes once the deployment is exercised, and
-do not describe any row as verified until it is.
+Every transaction below was sent from the application interface and resolved on
+chain. Rows marked **refused** are the point of the exercise: the interface
+predicted the refusal, sent the transaction anyway, and the contract rejected it.
 
-| Step | Transaction | Value | Result |
-|---|---|---|---|
-| create_agreement | | | |
-| accept_duty | | — | |
-| propose_determination (self-judging) | | — | blocked |
-| propose_determination (independent) | | — | pending |
-| countersign_determination | | — | in force |
-| release_escrow | | | paid |
+### Agreement #2 — the release path (0.01 GEN)
+
+| # | Action | From | Outcome | Transaction |
+|---|---|---|---|---|
+| 1 | `create_agreement` — B named, 0.01 GEN escrowed | A | `AWAITING_ACCEPTANCE` | [`0x2e204dcb…a81f0e6b`](https://explorer-studio.genlayer.com/tx/0x2e204dcb5621faa3fdcb84a39726c1f8dadf09848614fd3560a7a48da81f0e6b) |
+| 2 | `accept_duty` | **A** | **refused** — *Only the named responsible party may accept the duty* | [`0x5179453f…3a267619`](https://explorer-studio.genlayer.com/tx/0x5179453f254af2f2f19199a8d71fdc59e26723bfa0c3d27539976e1b3a267619) |
+| 3 | `accept_duty` | B | `ACTIVE` — two wallets bound to one duty text | [`0x7507c0e8…65361ed9`](https://explorer-studio.genlayer.com/tx/0x7507c0e8d192bc99b2bd3360c484bb90293a87c1b74144b9f61987cf65361ed9) |
+| 4 | `propose_determination` | **C** | **refused** — *Only a party to this agreement may propose*; attempt count and semantic budget both unchanged | [`0xcff331c3…fff883fd`](https://explorer-studio.genlayer.com/tx/0xcff331c392ba5f230aa039d707f5fb88d9da671e8b95af22528d2abdfff883fd) |
+| 5 | `propose_determination` — *"determined by the vendor in its sole discretion"* | A | `SELF_JUDGING_AUTHORITY` · blocked · no clause stored | [`0xa7bdcd3b…627d605f`](https://explorer-studio.genlayer.com/tx/0xa7bdcd3b616a7e234548e65593a135776de4514b3da6ce288a87d4f2627d605f) |
+| 6 | `release_escrow` | A | **refused** — *No independent determination clause is in force*; escrow still 0.01 GEN | [`0x2da577ba…e1386719`](https://explorer-studio.genlayer.com/tx/0x2da577ba8af641989bd743984573efd78cf3e55ee6890651686cd12ae1386719) |
+| 7 | `propose_determination` — *"determined by a third-party monitoring service jointly selected by both parties"* | A | `INDEPENDENT_DETERMINATION` · **pending only**, `active_determination_id` still `0` | [`0x69664faf…f0d16a1e`](https://explorer-studio.genlayer.com/tx/0x69664fafc5395c70004a6330931c467ade892b93fc9b0ded75cdd128f0d16a1e) |
+| 8 | `countersign_determination` | **A** | **refused** — *The proposing party cannot countersign its own clause* | [`0xda5b95ae…de7117d5`](https://explorer-studio.genlayer.com/tx/0xda5b95ae2764928db0110c56f6e744788bccfe83ddcb62c7e2a3c1aade7117d5) |
+| 9 | `countersign_determination` | B | Determination #1 (v1) **in force** | [`0xb8538def…aaace129`](https://explorer-studio.genlayer.com/tx/0xb8538defbed9ac4c1a452659c1a5abe26c957a2ada01efb4494af604aaace129) |
+| 10 | `refund_escrow` | A | **refused** — *An independent determination clause is already in force* | [`0xaec8abb0…b06b05b8`](https://explorer-studio.genlayer.com/tx/0xaec8abb088b2acd4ab24e37c68a18aa56a213a90354fee659380fd6fb06b05b8) |
+| 11 | `release_escrow` | A | `RELEASED` · `escrow_wei` `0` · **0.01 GEN paid to B** | [`0x07d6c590…4f3aa391`](https://explorer-studio.genlayer.com/tx/0x07d6c590cbb9b6098d7130a5f76e48d59344f599ab0f0fad17a2bc084f3aa391) |
+
+Wallet B held `100.00 GEN` before step 11 and `100.01 GEN` after it. That balance
+change is the transfer the local suite cannot observe.
+
+Rows 6 and 11 are the same call, from the same wallet, on the same agreement. The
+only thing that changed between them is the semantic verdict on a sentence, and it
+is what decided whether the money moved.
+
+### Agreement #1 — the refund path (0.005 GEN, 30-minute window)
+
+| # | Action | From | Outcome | Transaction |
+|---|---|---|---|---|
+| 1 | `refund_escrow`, before the window elapsed | A | **refused** — *Refund deadline has not passed* (consensus clock, not the browser's) | [`0xbd2328b0…70191a41`](https://explorer-studio.genlayer.com/tx/0xbd2328b0e370466458f028467e9015f326d96de9c9607e3c24d51ba170191a41) |
+| 2 | `refund_escrow`, after the window elapsed | A | `REFUNDED` · `escrow_wei` `0` · escrow returned to A | [`0xdfcac68d…8d8338b8`](https://explorer-studio.genlayer.com/tx/0xdfcac68dce01eb21ccf46a90e9ca6db22ba692c75ce5732411c292758d8338b8) |
+
+Agreement #1 reached one `SELF_JUDGING_AUTHORITY` verdict and never obtained an
+independent determination, which is exactly the state in which the refund path is
+open and the release path is closed.
+
+### Rows deliberately left out
+
+`create_agreement` and `accept_duty` for Agreement #1, and its self-judging
+proposal, were executed — the finalized state shows `ACTIVE → REFUNDED`,
+`attempts 1`, `blocked self-judging 1` — but their transaction hashes were not
+recorded at the time. They are omitted rather than reconstructed. Every hash in
+the tables above was copied from the transaction it names.
 
 ## E. Frontend
 
